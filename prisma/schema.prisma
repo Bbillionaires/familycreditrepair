@@ -1,0 +1,79 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Testimonial {
+  id        String   @id @default(cuid())
+  name      String
+  quote     String?
+  videoUrl  String
+  published Boolean  @default(true)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model Material {
+  id          String     @id @default(cuid())
+  title       String
+  description String
+  priceCents  Int        @default(0)
+  fileUrl     String
+  imageUrl    String?
+  published   Boolean    @default(true)
+  sortOrder   Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  purchases   Purchase[]
+}
+
+model ClassSession {
+  id              String   @id @default(cuid())
+  title           String
+  description     String?
+  startsAt        DateTime
+  durationMinutes Int      @default(60)
+  location        String   @default("Online via Zoom")
+  capacity        Int?
+  published       Boolean  @default(true)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  signups         Signup[]
+}
+
+model Signup {
+  id             String       @id @default(cuid())
+  classSession   ClassSession @relation(fields: [classSessionId], references: [id], onDelete: Cascade)
+  classSessionId String
+  name           String
+  email          String
+  phone          String?
+  familySize     Int?
+  notes          String?
+  createdAt      DateTime     @default(now())
+
+  @@index([classSessionId])
+}
+
+model Purchase {
+  id              String   @id @default(cuid())
+  material        Material @relation(fields: [materialId], references: [id])
+  materialId      String
+  name            String
+  email           String
+  amountCents     Int
+  stripeSessionId String   @unique
+  status          String   @default("pending")
+  downloadToken   String   @unique
+  createdAt       DateTime @default(now())
+
+  @@index([materialId])
+}
