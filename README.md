@@ -8,9 +8,9 @@ prominently on the home page, the calendar page, and the footer.
 ## Stack
 
 - **Next.js 16** (App Router, Server Actions) + React 19 + Tailwind CSS 4
-- **Prisma 7** + SQLite (via the `@prisma/adapter-better-sqlite3` driver
-  adapter, required by Prisma 7) — swap to Postgres/MySQL by changing the
-  datasource provider and adapter
+- **Prisma 7** + **Postgres** (via the standard `@prisma/adapter-pg` driver
+  adapter, required by Prisma 7) — works with any Postgres host (Neon,
+  Supabase, Vercel's own Postgres storage, a local Postgres for dev, etc.)
 - **Stripe Checkout** for paid materials (optional — free materials work
   with no Stripe account at all)
 - Admin area protected by a single shared password (`ADMIN_PASSWORD`), no
@@ -18,10 +18,15 @@ prominently on the home page, the calendar page, and the footer.
 
 ## Getting started
 
+You need a Postgres database before anything else works — this app has no
+zero-config local fallback. Options: run Postgres locally, use a free Neon
+project (neon.tech), or point at the same Postgres your production
+deployment uses (a separate branch/database on the same host is cleanest).
+
 ```bash
 npm install
-cp .env.example .env   # then edit the values below
-npm run db:migrate      # creates prisma/dev.db and applies the schema
+cp .env.example .env    # then set DATABASE_URL and the other values below
+npm run db:migrate      # applies prisma/migrations/ to your database
 npm run db:seed         # optional: adds a couple of sample rows
 npm run dev
 ```
@@ -33,7 +38,7 @@ Visit `http://localhost:3000` for the public site and
 
 | Variable | Required? | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | SQLite file path, defaults to `file:./dev.db` |
+| `DATABASE_URL` | yes | Postgres connection string. Use the "pooled" variant if your host offers one. |
 | `ADMIN_PASSWORD` | yes | Password to log in at `/admin/login` |
 | `SESSION_SECRET` | yes | Random string used to sign the admin session cookie (`openssl rand -base64 32`) |
 | `STRIPE_SECRET_KEY` | only for paid materials | Stripe secret API key |
@@ -76,8 +81,17 @@ not yet configured in a given environment.
 
 ## Deploying
 
-Any Node.js host works (e.g. Vercel). Because uploaded material files and
-the SQLite database live on local disk (`/storage` and `dev.db`), a
-serverless/ephemeral-filesystem host will lose them on redeploy — for
-production, either move to a managed Postgres database and object storage
-(S3, R2, etc.), or deploy to a host with a persistent disk.
+Any Node.js host works, including Vercel. `npm run build` runs
+`prisma migrate deploy` first, so pushing to your deploy branch applies any
+new migrations automatically as long as `DATABASE_URL` is set on the host.
+
+**Known remaining gap:** admin-uploaded material files are still saved to
+local disk (`/storage`, outside `public/`, deliberately not web-servable
+directly — see `src/lib/storage.ts`). On Vercel (or any serverless/
+ephemeral-filesystem host) those files disappear the moment the function
+instance recycles, so an uploaded file may 404 on download shortly after
+upload, even though the site itself now loads correctly. **Materials added
+via an external URL are unaffected** — this only hits the "upload a file"
+option in `/admin/materials`. Until this is moved to object storage (S3,
+Vercel Blob, R2, etc.), prefer linking to an externally-hosted file for
+anything deployed to Vercel.
