@@ -6,6 +6,7 @@ const links = [
   { href: "/testimonials", label: "Testimonials" },
   { href: "/materials", label: "Free & Paid Resources" },
   { href: "/calendar", label: "Classes & Calendar" },
+  { href: "/free-credit-reports", label: "Free Credit Reports" },
 ];
 
 export default function SiteHeader() {
