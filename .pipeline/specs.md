@@ -1,201 +1,137 @@
-# Spec: End-user account system (signup, login, my account, forgot username/password)
+# Spec: Cloudflare Turnstile bot-protection on signup/login/forgot-username/forgot-password
 
 ## Summary
-Add a real, multi-user account system for site visitors — email + username + password signup, login, a "my account" page (view info, change password, log out), and forgot-username/forgot-password recovery emails via Resend. This is entirely separate and independent from the existing single-shared-admin-password system: different cookie name, different signing secret, different DAL guard, no shared code paths. It is the foundation the future quiz feature will require, but the quiz itself is not part of this task. Linking existing anonymous Course/Material `Purchase` records to a logged-in account (a "my courses" library) and any CAPTCHA/Turnstile integration are explicitly out of scope, noted as open follow-ups, not silently built or silently skipped without mention.
+Add Cloudflare Turnstile as a bot-protection layer on the four public forms most exposed to automated abuse: `/signup`, `/login`, `/account/forgot-username`, `/account/forgot-password`. This sits on top of the already-shipped database-backed lockout and scrypt password hashing — it does not replace either. It follows this codebase's established graceful-degradation convention exactly (`isStripeConfigured()` in `src/lib/stripe.ts`, `isResendConfigured()` in `src/lib/email.ts`): when the two new env vars aren't set, every form works exactly as it does today, with zero behavior change and zero Cloudflare network calls. `/account` (change password) and `/account/reset-password` are explicitly out of scope — an active session and a possession-proven token respectively are already stronger anti-abuse signals than a CAPTCHA, so adding one there would be redundant.
 
 ## Files to change
 
-### `prisma/schema.prisma`
-- Change: add a `User` model.
-- Signature:
-  ```prisma
-  model User {
-    id                  String    @id @default(cuid())
-    email               String    @unique
-    username            String    @unique
-    passwordHash        String
-    sessionVersion      Int       @default(0)
-    failedLoginAttempts Int       @default(0)
-    lockedUntil         DateTime?
-    resetToken          String?   @unique
-    resetTokenExpiresAt DateTime?
-    createdAt           DateTime  @default(now())
-    updatedAt           DateTime  @updatedAt
-  }
-  ```
-  `email` and `username` are always stored lowercase (normalized at the point of writing in the action code, not via a DB-level trigger — see actions below), so uniqueness is effectively case-insensitive without needing citext or a computed column.
-- Generate the migration with `npx prisma migrate dev --name add_users` against a real reachable Postgres (start the local one if needed), exactly as done for the two prior schema changes in this repo. Do not hand-write the SQL.
-
-### `src/lib/password.ts` (new file)
-- Change: password hashing using Node's built-in `crypto.scrypt` (promisified), no new dependency. Stored format is a single string `"<saltHex>:<hashHex>"`, matching this codebase's flat-field convention (e.g. `Purchase.downloadToken`).
+### `src/lib/turnstile.ts` (new file)
+- Change: server-side configuration check + verification helper, no new npm dependency (plain `fetch` to Cloudflare's REST endpoint).
 - Signatures:
   ```ts
   import "server-only";
-  export async function hashPassword(password: string): Promise<string>
-  export async function verifyPassword(password: string, stored: string): Promise<boolean>
+
+  export function isTurnstileConfigured(): boolean
+
+  export async function verifyTurnstileToken(token: string | null, remoteip?: string): Promise<boolean>
   ```
-  `hashPassword`: generate a random 16-byte salt (`crypto.randomBytes(16).toString("hex")`), compute `scrypt(password, salt, 64)` (promisified), return `` `${saltHex}:${hashHex}` `` with the derived key hex-encoded.
-  `verifyPassword`: split `stored` on `:` into `saltHex`/`hashHex`; if the split doesn't produce exactly two parts, return `false` (malformed stored value, don't throw). Recompute `scrypt(password, saltHex, 64)`, then compare the recomputed hex against `hashHex` using `crypto.timingSafeEqual` on `Buffer.from(...)` of each (mirroring the existing `safeCompare` helper in `src/app/admin/auth-actions.ts` — same pattern, new file, since this one operates on password hashes, not the admin's single shared password).
-
-### `src/lib/user-session.ts` (new file)
-- Change: mirrors `src/lib/session.ts`'s exact jose/cookie pattern, as a fully separate, parallel implementation — different cookie name, different env var for the signing secret, different payload shape. Do not modify `src/lib/session.ts`.
-- Signatures:
-  ```ts
-  import "server-only";
-  const COOKIE_NAME = "fcr_user_session";
-  const SESSION_DURATION_MS = 7 * 24 * 60 * 60 * 1000; // same 7-day duration as admin, for consistency
-
-  export async function createUserSession(userId: string, sessionVersion: number): Promise<void>
-  export async function destroyUserSession(): Promise<void>
-  export async function verifyUserSession(): Promise<{ userId: string; sessionVersion: number } | null>
-  ```
-  - `createUserSession`: JWT payload `{ userId, sessionVersion }`, signed with `getSecretKey()` reading a **new, separate** env var `USER_SESSION_SECRET` (not `SESSION_SECRET` — the admin and user systems must not share a signing secret, so a leak of one never compromises the other). Same cookie options as `createAdminSession` (httpOnly, `secure: process.env.NODE_ENV === "production"`, `sameSite: "lax"`, `path: "/"`, `expires` matching the JWT's expiry) but under `COOKIE_NAME = "fcr_user_session"`.
-  - `verifyUserSession`: reads the cookie, `jwtVerify`s it, and returns the decoded `{ userId, sessionVersion }` on success or `null` on any failure (missing cookie, bad signature, expired, malformed payload) — same defensive try/catch-returns-false pattern as `verifyAdminSession`, adapted to return the payload instead of a boolean since callers need `userId`. **This function does not by itself check the payload's `sessionVersion` against the database** — that check belongs in the DAL (`requireUser`, below), which is the one place with DB access in the current call chain; keeping `verifyUserSession` cookie-only (like `verifyAdminSession` is) keeps this function's contract simple and matches the existing file's shape as closely as possible given the one genuine difference (stateful version check) this system needs.
-  - If `USER_SESSION_SECRET` is not set, throw the same style of error `verifyAdminSession`'s `getSecretKey()` throws for `SESSION_SECRET` (fail loudly at signing/verifying time, not silently).
-
-### `src/lib/dal.ts`
-- Change: add `requireUser`, alongside the existing `requireAdmin` (this file is generically named/purposed as the auth-guard DAL, not admin-specific — extend it rather than creating a second file).
-- Signature:
-  ```ts
-  export async function requireUser(): Promise<{ userId: string }> {
-    const session = await verifyUserSession();
-    if (!session) redirect("/login");
-
-    const user = await db.user.findUnique({ where: { id: session.userId } });
-    if (!user || user.sessionVersion !== session.sessionVersion) {
-      await destroyUserSession();
-      redirect("/login");
-    }
-
-    return { userId: user.id };
-  }
-  ```
-  This is where the `sessionVersion` staleness check actually happens (requires `db`, which `user-session.ts` deliberately doesn't import, keeping that file's concerns to cookies/JWTs only). A version mismatch means the password was changed elsewhere since this cookie was issued — treat it exactly like no session at all, and clear the stale cookie while we're here so the browser doesn't keep resending a dead token.
-
-### `src/lib/email.ts` (new file)
-- Change: mirrors `src/lib/stripe.ts`'s exact `getStripe`/`isStripeConfigured` pattern for Resend.
-- Signatures:
-  ```ts
-  import "server-only";
-  import { Resend } from "resend";
-
-  let resendClient: Resend | null = null;
-
-  export function getResend(): Resend {
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "RESEND_API_KEY is not set. Add it to your environment to send account recovery emails."
-      );
-    }
-    if (!resendClient) {
-      resendClient = new Resend(apiKey);
-    }
-    return resendClient;
-  }
-
-  export function isResendConfigured(): boolean {
-    return Boolean(process.env.RESEND_API_KEY);
-  }
-  ```
-  Also export one more constant here: `export const EMAIL_FROM = process.env.EMAIL_FROM || "onboarding@resend.dev";` — Resend's shared sandbox sender address works with no domain verification but can only deliver to the Resend account's own verified address; a real deployment will set `EMAIL_FROM` once a domain is verified. Document this in `.env.example` (below) rather than hardcoding an assumption about which one is active — the code doesn't need to know or care which mode it's in, it just uses whatever `EMAIL_FROM` resolves to.
+  - `isTurnstileConfigured()`: `return Boolean(process.env.TURNSTILE_SECRET_KEY);` — same one-liner shape as `isStripeConfigured`/`isResendConfigured`.
+  - `verifyTurnstileToken(token, remoteip?)`:
+    1. If `!token` (missing/empty/null — covers the "widget never produced a token" and "field omitted entirely" cases), return `false` immediately, no network call. **This is the one case that must fail closed** — see rationale in Edge cases.
+    2. Otherwise `POST` to `https://challenges.cloudflare.com/turnstile/v0/siteverify` with `Content-Type: application/x-www-form-urlencoded` and body `secret=<TURNSTILE_SECRET_KEY>&response=<token>` (plus `&remoteip=<remoteip>` when provided), built via `new URLSearchParams({...})`.
+    3. If the fetch itself throws (network error/timeout) or the response is not `ok`, `console.error(...)` the failure (mirroring the existing `console.error("RESEND_API_KEY not set — ...")` server-diagnosability convention) and return `true` — **fail open on Cloudflare-side/network infra failures, not on the token itself being invalid.** See rationale in Edge cases; this is a deliberate, reasoned choice, not an oversight.
+    4. Otherwise parse the JSON body and return `Boolean(data.success)`. A `success: false` response (expired token, already-used token, wrong secret, etc.) is treated uniformly — no special-casing individual `error-codes` values.
+  - This function does **not** itself call `isTurnstileConfigured()` — callers (the four Server Actions) check that first and skip calling this function entirely when unconfigured, exactly like `getResend()`/`getStripe()` are only ever called after their own `isXConfigured()` guard. Keep `verifyTurnstileToken` simple and single-purpose.
 
 ### `.env.example`
-- Change: document the two new optional variables and the one new required-for-user-accounts variable.
+- Change: document the two new variables, matching the existing comment style/placement (grouped near `RESEND_API_KEY`/`EMAIL_FROM` since both are optional bot/abuse-mitigation-adjacent features).
 - Add:
   ```
-  # Required for user accounts (signup/login). Generate with: openssl rand -base64 32
-  USER_SESSION_SECRET=""
-
-  # Optional: only needed for forgot-username/forgot-password emails.
-  RESEND_API_KEY=""
-  # Optional: defaults to Resend's shared sandbox sender (only deliverable to your
-  # own Resend account email until you verify a domain). Set this once you have
-  # a verified sending domain in Resend.
-  EMAIL_FROM=""
+  # Optional: enables Cloudflare Turnstile bot-protection on signup/login/
+  # forgot-username/forgot-password. Get these from the Cloudflare dashboard
+  # under Turnstile — no DNS or domain change required, this works standalone.
+  NEXT_PUBLIC_TURNSTILE_SITE_KEY=""
+  TURNSTILE_SECRET_KEY=""
   ```
 
-### `src/app/signup/actions.ts` (new file)
-- Change: `signupAction`, creating a `User` row, hashing the password, and logging the new user in immediately (auto-login after signup — no separate "please log in" step).
+### `src/components/turnstile-widget.tsx` (new file)
+- Change: one shared client component, used by all four forms instead of duplicating script-loading logic.
 - Signature:
-  ```ts
-  export type SignupFormState = { error?: string } | undefined;
-  export async function signupAction(_prevState: SignupFormState, formData: FormData): Promise<SignupFormState>
+  ```tsx
+  "use client";
+  export default function TurnstileWidget()
   ```
-- Validation (Zod): `email` (valid email, trimmed, lowercased), `username` (trimmed, lowercased, 3–20 chars, pattern `^[a-z0-9_-]+$`), `password` (min 8 chars — do not add composition/complexity rules beyond length, per current NIST guidance; this codebase has no precedent for complex regex password rules and shouldn't invent one here), `confirmPassword` (must match `password`, checked in code after the schema parse, not via a Zod `.refine` if that's more awkward to wire into this codebase's existing `safeParse` + `issues[0]` error-message pattern — your call on the cleanest way, just surface a clear "Passwords don't match" error).
-- Logic: check `db.user.findFirst({ where: { OR: [{ email }, { username }] } })` first; if found, return a single generic error `"An account with that email or username already exists."` — do not reveal which of the two collided (avoids leaking which specific emails/usernames are registered via a duplicate-signup probe). Hash the password, create the user, `createUserSession(user.id, user.sessionVersion)`, `redirect("/account")`.
-
-### `src/app/signup/page.tsx`, `signup-form.tsx` (new files)
-- Change: mirror `src/app/admin/login/page.tsx` + `login-form.tsx`'s exact layout/style (centered card, `useActionState`), adapted for four fields (username, email, password, confirmPassword) instead of one.
-
-### `src/app/login/actions.ts` (new file)
-- Change: `loginAction`. This is a **different file and different function** from `src/app/admin/auth-actions.ts`'s `loginAction` — no naming collision since they live in separate modules, but do not confuse the two or attempt to share code between them; they're independent by design.
-- Signature:
-  ```ts
-  export type LoginFormState = { error?: string } | undefined;
-  export async function loginAction(_prevState: LoginFormState, formData: FormData): Promise<LoginFormState>
+- Logic: reads `process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY` directly (safe in a Client Component — Next.js inlines `NEXT_PUBLIC_*` vars into the client bundle at build time, no server round-trip needed). If falsy/empty, `return null` — renders nothing at all when not configured, matching the "forms work exactly as today" requirement. Otherwise renders:
+  ```tsx
+  <>
+    <Script src="https://challenges.cloudflare.com/turnstile/v0/api.js" strategy="afterInteractive" />
+    <div className="cf-turnstile" data-sitekey={siteKey} />
+  </>
   ```
-- Fields: `username` (or email — accept either in the same input, see edge cases), `password`.
-- Logic:
-  1. Normalize the submitted identifier to lowercase, look up `db.user.findFirst({ where: { OR: [{ email: identifier }, { username: identifier }] } })`.
-  2. If no user found: return a generic `"Incorrect username/email or password."` (never reveal whether the identifier itself was wrong vs. the password).
-  3. If `user.lockedUntil` is set and in the future: return `"Too many failed attempts. Try again after " + <formatted time> + "."` — **check this before checking the password**, and return this same message regardless of whether the submitted password would have been correct (don't leak "your password was actually right, you're just locked out").
-  4. Otherwise verify the password. On failure: increment `failedLoginAttempts`; if it reaches `5`, set `lockedUntil` to 15 minutes from now; save; return the same generic incorrect-credentials message as step 2 (don't reveal "you're now locked out" vs. "wrong password" on the attempt that triggers the lock — only reveal lock status on a *subsequent* attempt, once `lockedUntil` is actually checked at the top of a later request per step 3). On success: reset `failedLoginAttempts` to `0` and `lockedUntil` to `null`, `createUserSession(user.id, user.sessionVersion)`, `redirect("/account")`.
+  using `Script` from `next/script` (default `afterInteractive` strategy — loads promptly once the page hydrates, not deferred like `lazyOnload`, since this gates form submission). Cloudflare's script auto-scans the DOM for `.cf-turnstile` elements and renders the widget into them implicitly (no `turnstile.render()` JS API call needed) — the widget injects its own `<input type="hidden" name="cf-turnstile-response" value="...">` as a descendant of that `div`, which is automatically included in the form's `FormData` on submit as long as the `div` is placed inside the `<form>` element. No props needed on `TurnstileWidget` — it is a self-contained, drop-in element.
 
-### `src/app/login/page.tsx`, `login-form.tsx` (new files)
-- Change: mirror the admin login page's layout, one field for username-or-email + one for password, link to `/signup` and to `/account/forgot-username` / `/account/forgot-password`.
+### `src/app/signup/signup-form.tsx`
+- Change: import `TurnstileWidget` from `@/components/turnstile-widget`, render `<TurnstileWidget />` immediately before the submit `<button>` (after the `confirmPassword` field's `<div>` and after the `{state?.error && ...}` line, i.e. as the last element inside the `<form>` before the button). No other changes to this file.
 
-### `src/app/account/actions.ts` (new file)
-- Change: `changePasswordAction`, `logoutAction`.
-- Signatures:
+### `src/app/login/login-form.tsx`
+- Change: same pattern — `<TurnstileWidget />` immediately before the submit `<button>`, after the `{state?.error && ...}` line. No other changes.
+
+### `src/app/account/forgot-username/forgot-username-form.tsx`
+- Change: same pattern — `<TurnstileWidget />` immediately before the submit `<button>`, inside the same `<form>` branch that's rendered when `!state?.success` (i.e. it must NOT render inside the `state?.success` early-return branch, since there's no form there to attach it to). No other changes.
+
+### `src/app/account/forgot-password/forgot-password-form.tsx`
+- Change: identical pattern to `forgot-username-form.tsx`. No other changes.
+
+### `src/app/signup/actions.ts`
+- Change: add an early Turnstile check inside `signupAction`, positioned **after** the Zod `parsed.success` check succeeds (so a request that's already invalid on shape doesn't waste a network round-trip to Cloudflare) and **before** the password-match check / `db.user.findFirst` duplicate lookup (so a bot request that fails verification never reaches the database at all).
+- Exact insertion point and code, right after:
   ```ts
-  export type ChangePasswordFormState = { error?: string; success?: boolean } | undefined;
-  export async function changePasswordAction(_prevState: ChangePasswordFormState, formData: FormData): Promise<ChangePasswordFormState>
-  export async function logoutAction(): Promise<void>
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
   ```
-- `changePasswordAction`: `requireUser()` first. Fields: `currentPassword`, `newPassword`, `confirmNewPassword`. Verify `currentPassword` against the stored hash — if wrong, return `{ error: "Current password is incorrect." }` (do not proceed). Validate `newPassword` (same min-8 rule as signup) and that it matches `confirmNewPassword`. On success: hash the new password, `db.user.update` setting `passwordHash` **and incrementing `sessionVersion` by 1** in the same update (invalidates every other device's session), **then immediately call `createUserSession(user.id, newSessionVersion)`** to re-issue a fresh cookie for the current browser with the new version — otherwise the user who just changed their password would immediately be logged out by their own action, which is confusing UX for zero security benefit (they just proved they know the new password). Return `{ success: true }` rather than redirecting, so the my-account page can show an inline confirmation instead of a jarring navigation.
-- `logoutAction`: `destroyUserSession()`, `redirect("/")` (not `/login` — logging out of a *user* account should land you back on the public homepage, unlike admin logout which lands on the admin login screen since there's nothing else for an admin session to do; a logged-out visitor is just a visitor again).
+  insert:
+  ```ts
+  if (isTurnstileConfigured()) {
+    const turnstileToken = formData.get("cf-turnstile-response");
+    const verified = await verifyTurnstileToken(
+      typeof turnstileToken === "string" ? turnstileToken : null
+    );
+    if (!verified) {
+      return { error: "Verification failed. Please try again." };
+    }
+  }
+  ```
+  Add `import { isTurnstileConfigured, verifyTurnstileToken } from "@/lib/turnstile";` to the top imports. Return type stays `SignupFormState` (`{ error?: string } | undefined`) — reusing the existing shape exactly, per the "do not invent a new error shape" requirement.
 
-### `src/app/account/page.tsx`, `change-password-form.tsx` (new files)
-- Change: `requireUser()` at the top, load `db.user.findUnique({ where: { id: userId } })`, display `username` and `email` (read-only text, no edit-email/edit-username in this v1 — not asked for, don't add it), a change-password form (colocated client component, mirroring `src/app/calendar/signup-form.tsx`'s colocation pattern), and a logout button/form matching the exact style of `src/app/admin/layout.tsx`'s logout `<form action={logoutAction}>` button.
+### `src/app/login/actions.ts`
+- Change: add the same early Turnstile check inside `loginAction`, positioned **after** the existing `if (!identifier || !password) return { error: ... }` guard and **before** `db.user.findFirst` — i.e. before any database access at all, since login is the highest-value target for credential-stuffing bots and this check should gate the DB round-trip too.
+- Exact insertion point: right after
+  ```ts
+  if (!identifier || !password) {
+    return { error: "Incorrect username/email or password." };
+  }
+  ```
+  insert:
+  ```ts
+  if (isTurnstileConfigured()) {
+    const turnstileToken = formData.get("cf-turnstile-response");
+    const verified = await verifyTurnstileToken(
+      typeof turnstileToken === "string" ? turnstileToken : null
+    );
+    if (!verified) {
+      return { error: "Verification failed. Please try again." };
+    }
+  }
+  ```
+  Add the same import. Return type stays `LoginFormState`. Note this message is deliberately distinct from `"Incorrect username/email or password."` — a CAPTCHA failure is not sensitive account information (unlike "wrong password" vs. "no such user," which the existing code correctly keeps indistinguishable), so there's no reason to blur it into the same generic string; "shape" in the "don't invent a new error shape" requirement means the `{ error: string }` type, not necessarily identical wording.
 
-### `src/app/account/forgot-username/actions.ts`, `page.tsx`, `forgot-username-form.tsx` (new files)
-- Change: `forgotUsernameAction(_prevState, formData)` — single `email` field. **Always** returns the same generic success state (e.g. `{ success: true }`, no error branch surfaced to the client for "email not found" — a malformed/empty email is the only client-visible validation error worth showing) regardless of whether the email exists, to avoid confirming which emails are registered.
-  - If the email exists in `db.user`: if `isResendConfigured()`, send an email (via `getResend().emails.send({ from: EMAIL_FROM, to: user.email, subject: "Your username", text/html: \`Your username is: ${user.username}\` })`) containing the username. If Resend isn't configured, `console.error("RESEND_API_KEY not set — cannot send forgot-username email for", user.email)` (so the admin can diagnose from server logs why a real user says they never got the email) but still return the same generic success to the client.
-  - If the email doesn't exist: do nothing, still return the same generic success.
-- The page always shows a message like "If that email is registered, we've sent the username to it." after submission — no separate error/success UI branch based on whether the account actually existed.
+### `src/app/account/forgot-username/actions.ts`
+- Change: add the same check inside `forgotUsernameAction`, positioned **after** the `emailResult.success` check and **before** `db.user.findUnique`.
+- Exact insertion point: right after
+  ```ts
+  if (!emailResult.success) {
+    return { error: emailResult.error.issues[0]?.message };
+  }
+  ```
+  insert the same `isTurnstileConfigured()` / `verifyTurnstileToken` block as above, returning `{ error: "Verification failed. Please try again." }` on failure. Add the same import. Return type stays `ForgotUsernameFormState`.
 
-### `src/app/account/forgot-password/actions.ts`, `page.tsx`, `forgot-password-form.tsx` (new files)
-- Change: `forgotPasswordAction(_prevState, formData)` — single `email` field, same generic-response posture as forgot-username.
-  - If the email exists: generate `resetToken = nanoid(32)`, `resetTokenExpiresAt = now + 1 hour`, `db.user.update` (this **overwrites** any previously-requested token — only the most recently requested reset link is ever valid, per the edge cases below). If Resend configured, email a link to `` `${origin}/account/reset-password?token=${resetToken}` `` (reuse the exact `getSiteOrigin()` helper already duplicated in `src/app/materials/actions.ts` and `src/app/courses/actions.ts` — copy that same small function here too, matching the existing precedent of it being duplicated per-module rather than factored out, don't factor it out now as an unrelated refactor). If Resend not configured, `console.error(...)` same as forgot-username, still return generic success.
-  - If the email doesn't exist: do nothing, same generic success.
-
-### `src/app/account/reset-password/actions.ts`, `page.tsx`, `reset-password-form.tsx` (new files)
-- Change: `page.tsx` reads `?token=` from `searchParams`. Look up `db.user.findUnique({ where: { resetToken: token } })`. If not found, or `resetTokenExpiresAt` is in the past, render a clear "This link is invalid or has expired." message with a link back to `/account/forgot-password` — do not render a password form at all in this case.
-  If valid: render `reset-password-form.tsx`, a client component posting to `resetPasswordAction(token, _prevState, formData)` (bind the token, mirroring how e.g. `updateMaterial.bind(null, id)` binds an id in the existing codebase). Fields: `newPassword`, `confirmNewPassword`.
-  `resetPasswordAction`: re-validate the token server-side (don't trust that the page's earlier check is still true — re-check existence/expiry inside the action itself, since time has passed and this is a separate request). On success: hash the new password, update `passwordHash`, increment `sessionVersion`, **clear `resetToken` and `resetTokenExpiresAt` to `null`** (single-use — the same link cannot be used twice), `createUserSession(user.id, newSessionVersion)` (auto-login after a successful reset, redirect to `/account` — nicer UX than making them log in again with the password they just set, and there's no security reason to force a second step here since they just proved control of the reset link), `redirect("/account")`.
-
-### `src/components/site-header.tsx`
-- Change: convert to an `async function SiteHeader()` (currently synchronous) so it can check the visitor's session, and add an auth-state area to the header **separate from the existing content `links` array** — do not add Login/Sign Up/Account into that array, which is for content-section navigation; add a distinct element (e.g. a `<div className="flex items-center gap-2">` placed after the `<nav>`, adjusting the outer flex container as needed) showing:
-  - Logged out: `Log In` and `Sign Up` links (to `/login`, `/signup`).
-  - Logged in: `My Account` link (to `/account`) and a small inline `<form action={logoutAction}>` logout button (import `logoutAction` from `src/app/account/actions.ts`).
-  Determine logged-in state via `requireUser`'s lower-level building block — call `verifyUserSession()` directly here (not `requireUser()`, which redirects; the header must never redirect, it just needs to know yes/no) — a `sessionVersion` mismatch check is not necessary in the header (worst case a just-invalidated session shows "My Account" for one nav render before `requireUser()` on the actual `/account` page redirects it to `/login` — acceptable, the header is a hint, not an authorization boundary).
+### `src/app/account/forgot-password/actions.ts`
+- Change: identical pattern, inserted after the `emailResult.success` check and before `db.user.findUnique`. Add the same import. Return type stays `ForgotPasswordFormState`.
 
 ## Edge cases
-- **Login accepts either username or email in one field**: the single `identifier` input is checked against both columns via `OR`. If someone's chosen username happens to collide with someone else's email address (impossible today since both are globally unique across the same table, but confirm this is actually impossible: `username` and `email` are both `@unique` on the *same* `User` model, so a value can be *either* one user's email *or* another user's username, and the `OR` lookup could theoretically match two different rows if user A's username equals user B's email) — **use `findFirst` deliberately, not `findUnique`**, and if this scenario is a real concern it's already handled correctly by only ever authenticating against whichever single row `findFirst` returns and then checking that specific row's password; a same-value collision across the two different rows on two different columns doesn't create a security hole, it just means the login form would authenticate whichever one Postgres happens to return first for an ambiguous identifier — extremely unlikely in practice (would require user B to have registered a username exactly matching an existing user's email), not worth adding extra schema complexity to prevent for a v1.
-- **Signup duplicate email/username**: single generic error, no distinction, as specified above.
-- **Login lockout**: 5 failed attempts → 15-minute lockout, checked before password verification on every subsequent attempt during the lockout window; a successful login always resets both counters.
-- **Password reset token reuse**: each new forgot-password request invalidates the previous token (overwritten, not appended); a used token is cleared immediately upon successful reset so it cannot be replayed.
-- **Password reset token expired or unknown**: no password form rendered at all, just a message + link to request a new one.
-- **Changing password while other sessions exist**: `sessionVersion` increments, invalidating all other devices' cookies on their next `requireUser()` check; the current browser gets a freshly re-issued cookie in the same request so it isn't logged out by its own action.
-- **Resend not configured**: forgot-username/forgot-password still show the same generic "check your email" message to the visitor (no error, no mention of misconfiguration) but log a clear server-side error naming which email address's request couldn't actually be sent, so the site owner can diagnose from logs — this deliberately differs from the Stripe pattern (which *does* show a visible "not set up yet" message), because revealing recovery-flow success/failure to the public is itself an information-disclosure risk (email enumeration) that outweighs the operability convenience Stripe's pattern optimizes for.
-- **Header session check on every request**: converting `SiteHeader` to async and calling `verifyUserSession()` (a cookie read) inside it, given `SiteHeader` renders inside the root layout wrapping every page, will very likely convert previously-static pages (`/free-credit-reports` currently builds as `○` static) into dynamically-rendered ones, since accessing cookies anywhere in a request's render tree marks that render as dynamic in this Next.js version. **This is an accepted, expected side effect of this feature, not a regression to prevent** — verify it by checking the build output's route table after this change and confirm in `changes.md` which routes changed from `○` to `ƒ`, rather than being surprised by it.
-- **Empty/whitespace-only username or email**: rejected by the existing Zod `.trim().min(...)`-style validation already used throughout this codebase's other forms — apply the same pattern, don't invent a new one.
+- **Turnstile not configured (`TURNSTILE_SECRET_KEY` unset)**: `isTurnstileConfigured()` returns `false`, every action skips the check entirely — zero behavior change from today, zero Cloudflare network calls, `TurnstileWidget` renders `null` so no script tag or div appears in the HTML either. This is the default state right now and must ship working exactly as today until real keys are added.
+- **Token missing from form submission** (widget never rendered, JS disabled, field stripped, or a bot simply omits the field entirely): `verifyTurnstileToken(null)` returns `false` with no network call → the action rejects with `"Verification failed. Please try again."`. **This must fail closed.** If it failed open instead, Turnstile would provide zero actual protection — any scripted bot could bypass it for free simply by never submitting the field, which is exactly the population this feature exists to stop. This is the one case where "fail closed" is not a judgment call but a logical requirement of the feature doing anything at all.
+- **Widget fails to load client-side** (ad blocker, privacy extension, or Cloudflare's own script being blocked/unreachable for that visitor): from the server's point of view this is indistinguishable from "token missing" above, and is rejected the same way. **This is a deliberate, accepted trade-off, not an oversight**: Cloudflare's default "Managed" mode is specifically designed to pass the overwhelming majority of real visitors invisibly (no visible challenge at all in most cases), so the realistic exposure is a small minority of users running aggressive script-blocking. Given the four affected forms are exactly the ones bots target most (credential stuffing on login, mass fake signups, recovery-email spam), the site owner's stated priority (avoid false-positive lockouts of real users) is better served by *not* enabling this feature until ready, or by choosing Turnstile's more lenient widget mode in the Cloudflare dashboard, than by having the code silently fail open here — a silent fail-open would make the feature a no-op against the exact threat it's meant to address. Recommendation only, easy to revisit: if real users report being blocked after this ships, the fix is a Cloudflare dashboard setting (widget mode), not a code change.
+- **Token already used, expired, or otherwise rejected by Cloudflare (`success: false` in the siteverify response)**: treated identically to "token missing" — reject with the same generic message. No special-casing of individual `error-codes` values; there's no user-facing benefit to distinguishing "expired" from "invalid" from "already used," and doing so risks leaking implementation details to an attacker probing the endpoint.
+- **Cloudflare's siteverify API itself is unreachable, slow, or erroring (network failure, non-2xx, malformed response)** — distinct from the token being wrong: here the *verification service*, not the *visitor*, is the source of failure. `verifyTurnstileToken` catches this, logs a `console.error` for the site owner to notice in server logs, and **returns `true` (fails open)**. Rationale, matching the site owner's stated priority for this feature: a transient Cloudflare-side outage should not be able to lock every real visitor out of signing up, logging in, or recovering their account — the existing database-backed lockout (5 failed attempts → 15-minute lock) remains fully active as the primary defense regardless of Turnstile's availability, so failing open here only means this one *secondary* layer briefly stands down during a rare outage, not that the site becomes undefended.
+- **Stale/already-consumed token on a resubmitted form after a validation error** (e.g. a user fixes a typo in their password and clicks submit again without the Turnstile widget re-issuing a fresh token): out of scope for this v1 to solve with an explicit `turnstile.reset()` JS API call — the implicit auto-render mode this spec uses doesn't expose a widget handle to reset programmatically without materially more client-side code (holding a widget ID via the explicit `turnstile.render()` API instead of implicit auto-render). Accepted minor rough edge: in the rare case this happens, the user sees the same generic `"Verification failed. Please try again."` message as any other rejected-token case, and a normal page refresh resolves it (a fresh widget mount issues a fresh token). Not worth the added complexity for a first version; revisit if it turns out to affect real users in practice.
+- **`remoteip` parameter**: optional per Cloudflare's API and not required for verification to work. Not wired up in this v1 (would require reading the request's IP from headers via `next/headers`, which varies by hosting environment/proxy setup) — omit it entirely for now rather than guessing at header names; `verifyTurnstileToken`'s signature already accepts an optional `remoteip` so it can be wired up later without a signature change.
 
 ## Dependencies / config changes
-- No new npm packages (`resend` is already installed; password hashing uses Node's built-in `crypto`).
-- One new database migration (`add_users`) — generate with `prisma migrate dev` against a real Postgres, as with the two prior schema changes.
-- One new **required** environment variable for this feature to function at all: `USER_SESSION_SECRET`. Two new **optional** ones: `RESEND_API_KEY`, `EMAIL_FROM`.
+- No new npm packages — `next/script` is part of Next.js itself, and Cloudflare's siteverify API is called with a plain `fetch`.
+- No database/schema changes.
+- Two new **optional** environment variables: `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY`. The feature is fully inert until both are set (the site key controls whether the widget renders client-side; the secret key controls whether the server enforces the check — in practice the site owner will set both together, but the code degrades correctly even if only one is set: widget renders but server-side `isTurnstileConfigured()` stays `false` and skips verification, or vice versa, widget doesn't render so real users could never produce a token and every submission would be rejected as "token missing" — **this specific half-configured state is worth calling out**: setting only `TURNSTILE_SECRET_KEY` without `NEXT_PUBLIC_TURNSTILE_SITE_KEY` would lock out every real visitor, since the server would enforce a check that the client-side widget was never rendered to satisfy. Document this in the `.env.example` comment as "set both together.").
 
 ## Open questions
-- None on the mechanics of this task. Restating the two explicitly out-of-scope items already agreed with the site owner: (1) no linking of existing Course/Material `Purchase` records to accounts yet (still anonymous-token-based, per the prior Course task's own deferred note); (2) no Cloudflare Turnstile/CAPTCHA (still an open, unresolved decision from an earlier conversation) — this task's login/signup throttling is server-side/database-backed only, no CAPTCHA widget.
+None blocking. One judgment call was made rather than left open (the fail-open-on-Cloudflare-outage vs. fail-closed-on-missing-token asymmetry) — both sides of that decision are explicitly reasoned through in the Edge cases section above, with the specific trade-off flagged for the site owner to revisit if real-world behavior doesn't match expectations after this ships.

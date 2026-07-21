@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { verifyPassword } from "@/lib/password";
 import { createUserSession } from "@/lib/user-session";
+import { isTurnstileConfigured, verifyTurnstileToken } from "@/lib/turnstile";
 
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
@@ -23,6 +24,16 @@ export async function loginAction(
 
   if (!identifier || !password) {
     return { error: "Incorrect username/email or password." };
+  }
+
+  if (isTurnstileConfigured()) {
+    const turnstileToken = formData.get("cf-turnstile-response");
+    const verified = await verifyTurnstileToken(
+      typeof turnstileToken === "string" ? turnstileToken : null
+    );
+    if (!verified) {
+      return { error: "Verification failed. Please try again." };
+    }
   }
 
   const user = await db.user.findFirst({

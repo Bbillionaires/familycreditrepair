@@ -1,42 +1,21 @@
-# Changes: User accounts (signup, login, my-account, forgot username/password)
+# Changes: Cloudflare Turnstile bot-protection on signup/login/forgot-username/forgot-password
 
 ## Files changed
+- `src/lib/turnstile.ts` (new): `isTurnstileConfigured()` and `verifyTurnstileToken(token, remoteip?)`, mirroring `src/lib/stripe.ts`/`src/lib/email.ts`'s exact graceful-degradation shape. Missing/empty token returns `false` with no network call (fail closed — the one case that must, or the whole feature is a no-op). A real Cloudflare siteverify round trip that fails (bad secret, network error, non-2xx) is logged via `console.error` and returns `true` (fail open) — deliberate, reasoned in the spec, not an oversight.
+- `.env.example`: documented `NEXT_PUBLIC_TURNSTILE_SITE_KEY` and `TURNSTILE_SECRET_KEY`, including the "set both together" warning from the spec (setting only the secret key would lock out every real visitor).
+- `src/components/turnstile-widget.tsx` (new): one shared client component. Renders `null` when `NEXT_PUBLIC_TURNSTILE_SITE_KEY` is unset (no script tag, no div — zero footprint when unconfigured). Otherwise loads Cloudflare's script via `next/script` (`afterInteractive`) and renders the `<div class="cf-turnstile" data-sitekey="...">` that Cloudflare's script auto-scans for and renders into implicitly.
+- `src/app/signup/signup-form.tsx`, `src/app/login/login-form.tsx`, `src/app/account/forgot-username/forgot-username-form.tsx`, `src/app/account/forgot-password/forgot-password-form.tsx`: added `<TurnstileWidget />` immediately before each form's submit button.
+- `src/app/signup/actions.ts`, `src/app/login/actions.ts`, `src/app/account/forgot-username/actions.ts`, `src/app/account/forgot-password/actions.ts`: added the early Turnstile check (only runs `isTurnstileConfigured()` is true) at the exact insertion points the spec specified — after existing input validation, before any database access. Rejects with `{ error: "Verification failed. Please try again." }` on failure; this is a distinct message from each action's existing generic-credentials error, since a CAPTCHA failure isn't sensitive account information the way "wrong password vs. no such user" is.
 
-### Schema / data
-- `prisma/schema.prisma`: added `User` model (email, username, passwordHash, sessionVersion, failedLoginAttempts, lockedUntil, resetToken, resetTokenExpiresAt).
-- `prisma/migrations/20260721161054_add_users/`: migration for the above, generated and applied against a real local Postgres instance.
-
-### Core libraries
-- `src/lib/password.ts` (new): scrypt-based password hashing/verification, zero new dependencies (`crypto.scrypt` + `crypto.timingSafeEqual`).
-- `src/lib/user-session.ts` (new): jose/JWT httpOnly-cookie session, cookie name `fcr_user_session`, fully independent of the admin session (`fcr_admin_session`). Payload carries `sessionVersion` so changing/resetting a password invalidates all other outstanding sessions without a server-side blocklist.
-- `src/lib/dal.ts`: added `requireUser()` alongside the existing `requireAdmin()`.
-- `src/lib/email.ts` (new): Resend wrapper mirroring `src/lib/stripe.ts`'s `isStripeConfigured()` pattern — `isResendConfigured()` / `getResend()` / `EMAIL_FROM`. Degrades gracefully (server-side `console.error`, generic success response to the client) when `RESEND_API_KEY` is unset.
-
-### Routes
-- `src/app/signup/{actions.ts,signup-form.tsx,page.tsx}`: email + username + password signup, duplicate-email/username rejected with one generic message (no field-level enumeration).
-- `src/app/login/{actions.ts,login-form.tsx,page.tsx}`: login by username OR email. Database-backed brute-force lockout (5 failed attempts → 15 min lockout on the `User` row) — no in-memory state, safe for Vercel's serverless model.
-- `src/app/account/{actions.ts,change-password-form.tsx,page.tsx}`: account info display, change-password (re-issues a fresh session for the current browser while bumping `sessionVersion` to invalidate all other sessions), logout.
-- `src/app/account/forgot-username/{actions.ts,forgot-username-form.tsx,page.tsx}`: always returns a generic success message regardless of whether the email exists.
-- `src/app/account/forgot-password/{actions.ts,forgot-password-form.tsx,page.tsx}`: generates a 1-hour single-use reset token (nanoid), same generic-response posture as forgot-username.
-- `src/app/account/reset-password/{actions.ts,page.tsx,reset-password-form.tsx}`: `page.tsx` server-checks the token before rendering anything — invalid/expired tokens get a message and no form at all; valid tokens render the form. Completing the reset clears the token (single-use), bumps `sessionVersion`, and auto-logs the user in.
-
-### Header
-- `src/components/site-header.tsx`: converted to `async function SiteHeader()`, reads `verifyUserSession()` (never redirects) to show Log In/Sign Up when logged out, or My Account/Log out when logged in.
-
-### Config
-- `.env.example`: documented `USER_SESSION_SECRET` (required) and `RESEND_API_KEY`/`EMAIL_FROM` (optional).
-
-## Bug found and fixed during verification
-`requireUser()` originally called `destroyUserSession()` (a cookie write) when it detected a stale `sessionVersion` — but that check runs during a Server Component render (e.g. loading `/account`), and Next.js throws `Cookies can only be modified in a Server Action or Route Handler` if you mutate cookies there. This surfaced as a real "A server error occurred" page, not a redirect, the first time an old session was reused after a password change/reset. Fixed by dropping the cookie-clear and just redirecting to `/login` — the stale cookie is harmless since every future request re-runs the same check, and it's overwritten the next time the user actually logs in.
-
-## Side effect (expected, verified)
-Every route in the app is now server-rendered on demand (`ƒ`) instead of some being static (`○`) — confirmed in the `next build` output. This is expected: `SiteHeader` is in the root layout and now reads the session cookie on every request, so no page under it can be statically prerendered anymore. Not a regression to fix, just documented per the original spec's callout.
-
-## Explicitly out of scope (documented follow-ups, not built)
-- Linking existing anonymous Course/Material `Purchase` records to logged-in accounts ("my courses" library).
-- Any Cloudflare Turnstile/CAPTCHA integration — still an open decision with the site owner.
+## Notes / deviations from spec
+- None. Every file, signature, and insertion point matches `.pipeline/specs.md` exactly.
+- One small addition not explicitly spelled out in the spec's code snippet but required for TypeScript correctness: `verifyTurnstileToken` includes a defensive `if (!secret) return false` before building the request (the spec's snippet implicitly assumes `TURNSTILE_SECRET_KEY` is present at that point, which it always is in practice since callers only invoke this function after their own `isTurnstileConfigured()` check — this is just type-narrowing `process.env.TURNSTILE_SECRET_KEY`'s `string | undefined` type, not a behavior change; the branch cannot be reached given how the function is actually called).
 
 ## Build/lint status
-- `npm run lint`: pass, no warnings.
-- `npm run build` (against a real local Postgres): pass. Migration applies cleanly, `next build` compiles and typechecks with no errors.
-- Manual/Playwright verification against `next start` (production build) on a real local Postgres instance, exercising: signup, duplicate-signup rejection, header auth-state in both directions, login by username and by email, 5-failed-attempt lockout and the lockout message, correct password still rejected while locked, login succeeding once lockout clears, change-password (current session stays logged in, other sessions invalidated by `sessionVersion`), forgot-username and forgot-password in the Resend-not-configured degraded mode (generic success message, no enumeration, no crash), full reset-password flow including invalid-token and single-use-token rejection, and cross-session invalidation after a password reset. All 27 checks passed.
+- `npm run lint`: pass, no output.
+- `npm run build` (against a real local Postgres): pass, both with Turnstile env vars unset and with them set (rebuilt both ways to confirm — `NEXT_PUBLIC_*` vars are inlined at build time, so this genuinely needs two separate builds to verify both states, not just two runtime configs).
+- **Unconfigured mode (default, ships as-is today):** confirmed via raw HTML fetch that `/login` and `/signup` contain zero occurrences of `cf-turnstile` or `challenges.cloudflare.com` — the widget component truly renders nothing. Confirmed via Playwright that signup and login still complete end-to-end exactly as before this change (no Turnstile check runs, zero added latency, zero behavior change).
+- **Configured mode:** rebuilt with `NEXT_PUBLIC_TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` set to Cloudflare's own publicly-documented testing keys (`1x00000000000000000000AA` / `1x0000000000000000000000000000000AA`, an "always passes" pair Cloudflare provides specifically for integration testing without a real site registration). Confirmed via raw HTML fetch that the script tag and `data-sitekey` attribute render correctly.
+- **Server-side verification logic, tested against the real Cloudflare API** (not mocked): ran the exact fetch/parse logic from `verifyTurnstileToken` directly against `https://challenges.cloudflare.com/turnstile/v0/siteverify` using Cloudflare's documented testing secrets — the "always passes" secret (`1x...AA`) returned `success: true`, the "always fails" secret (`2x...AA`) returned `success: false` for the identical token, and a `null` token returned `false` locally with no network call. This confirms the fail-closed/fail-open logic is correct against the real external dependency, not just internally self-consistent.
+- **Not verified end-to-end in a real browser this pass:** the actual client-side widget script (`challenges.cloudflare.com/turnstile/v0/api.js`) failed to load inside this sandbox's headless Chromium specifically — `net::ERR_CONNECTION_RESET` — even though the identical URL is reachable via `curl` (through the same proxy) and the server itself serves the correct HTML. This appears to be a sandbox-specific headless-browser networking limitation (this session's `curl`/Node `fetch` calls go through a configured HTTPS proxy that Chromium doesn't automatically pick up, and explicit `--proxy-server`/context-level proxy options didn't resolve it either), not an application bug — the server-rendered markup, the real siteverify API round trip, and the unconfigured-mode zero-footprint behavior were all independently confirmed instead. Flagging this gap explicitly for the tester/reviewer rather than silently claiming full browser coverage.
+- Also discovered and worked around, unrelated to Turnstile: this sandbox's headless Chromium has an HTTP/2 keep-alive quirk against the local Next.js server — reusing the same `Page` across a client-side-redirect-then-`goto` sequence intermittently broke all subsequent navigations on that page (`net::ERR_CONNECTION_RESET`-style browser error interstitial), even though the server was confirmed healthy via `curl` throughout. Worked around by launching with `--disable-http2` and/or opening a fresh `Page` after a client-triggered redirect. Documented here in case it recurs for the tester.

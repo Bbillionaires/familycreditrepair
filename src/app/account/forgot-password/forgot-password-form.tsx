@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import { forgotPasswordAction } from "./actions";
+import TurnstileWidget from "@/components/turnstile-widget";
 
 export default function ForgotPasswordForm() {
   const [state, action, pending] = useActionState(forgotPasswordAction, undefined);
@@ -30,6 +31,7 @@ export default function ForgotPasswordForm() {
         />
       </div>
       {state?.error && <p className="text-sm text-red-600">{state.error}</p>}
+      <TurnstileWidget />
       <button
         type="submit"
         disabled={pending}

@@ -2,6 +2,7 @@
 
 import { useActionState } from "react";
 import { loginAction } from "./actions";
+import TurnstileWidget from "@/components/turnstile-widget";
 
 export default function LoginForm() {
   const [state, action, pending] = useActionState(loginAction, undefined);
@@ -33,6 +34,7 @@ export default function LoginForm() {
         />
       </div>
       {state?.error && <p className="text-sm text-red-600">{state.error}</p>}
+      <TurnstileWidget />
       <button
         type="submit"
         disabled={pending}

@@ -5,6 +5,7 @@ import { redirect } from "next/navigation";
 import { db } from "@/lib/db";
 import { hashPassword } from "@/lib/password";
 import { createUserSession } from "@/lib/user-session";
+import { isTurnstileConfigured, verifyTurnstileToken } from "@/lib/turnstile";
 
 const SignupSchema = z.object({
   email: z.string().trim().toLowerCase().email("Enter a valid email address"),
@@ -34,6 +35,16 @@ export async function signupAction(
 
   if (!parsed.success) {
     return { error: parsed.error.issues[0]?.message ?? "Invalid input" };
+  }
+
+  if (isTurnstileConfigured()) {
+    const turnstileToken = formData.get("cf-turnstile-response");
+    const verified = await verifyTurnstileToken(
+      typeof turnstileToken === "string" ? turnstileToken : null
+    );
+    if (!verified) {
+      return { error: "Verification failed. Please try again." };
+    }
   }
 
   const { email, username, password, confirmPassword } = parsed.data;
