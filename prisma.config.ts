@@ -10,6 +10,11 @@ export default defineConfig({
     seed: "npx tsx prisma/seed.ts",
   },
   datasource: {
-    url: process.env["DATABASE_URL"],
+    // Prefer the unpooled/direct connection for migrations when available
+    // (e.g. Neon's DATABASE_URL_UNPOOLED) — Prisma Migrate's session-level
+    // locking is unreliable through a transaction-mode connection pooler.
+    // The running app itself connects independently via DATABASE_URL
+    // (see src/lib/db.ts), so this only affects CLI/migration commands.
+    url: process.env["DATABASE_URL_UNPOOLED"] ?? process.env["DATABASE_URL"],
   },
 });
