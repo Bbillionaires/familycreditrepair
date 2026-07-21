@@ -1,33 +1,42 @@
-# Changes: Course content type (structured, multi-lesson, free/paid)
+# Changes: User accounts (signup, login, my-account, forgot username/password)
 
 ## Files changed
-- `prisma/schema.prisma`: new `Course` and `Lesson` models; `Purchase.materialId` changed to optional, new optional `Purchase.courseId` + `Course` relation. Migration `20260721141501_add_courses` generated against a real Postgres instance (not hand-written) and applied.
-- `src/lib/storage.ts`: added `saveLessonFile`/`resolveLessonFilePath`, mirroring the existing Material functions exactly, pointed at a sibling `storage/lessons` directory.
-- `src/app/admin/courses/actions.ts`, `course-form.tsx`, `page.tsx`, `new/page.tsx`, `[id]/edit/page.tsx`: Course admin CRUD, mirroring the Material admin CRUD pattern (minus file/externalFileUrl fields, which don't exist at the course level).
-- `src/app/admin/courses/[id]/lessons/actions.ts`, `lesson-form.tsx`, `page.tsx`, `new/page.tsx`, `[lessonId]/edit/page.tsx`: nested lesson management, mirroring the class-signups nesting pattern combined with the standard CRUD trio. Lessons are valid with any combination (including none) of content/video/file.
-- `src/components/course-card.tsx`: mirrors `MaterialCard` exactly, plus the title is a link to the course detail page (Material has no detail page, so this is a new, justified addition, not an inconsistency).
-- `src/app/courses/actions.ts`: `requestFreeCourseAccess`/`startCourseCheckout`, mirroring the Material public actions exactly, redirecting to `/courses/[id]?token=...` instead of a file download.
-- `src/app/courses/page.tsx`: mirrors `materials/page.tsx` exactly (Free/Paid sections).
-- `src/app/courses/[id]/page.tsx` + colocated `course-unlock-form.tsx`: the core access-gating page — locked view shows title/description/price/lesson-titles-only + inline unlock form; unlocked view (valid `?token=` matching a paid Purchase for this course) renders full lesson content, video embeds, and file download links.
-- `src/app/courses/success/page.tsx`: mirrors `materials/success/page.tsx`, links to `/courses/[id]?token=...` on success; falls back to a plain `/courses` link if `course_id` is missing from the query string (defensive only).
-- `src/app/api/courses/[id]/lessons/[lessonId]/file/route.ts`: new route serving lesson files, gated by a `?token=` query param checked against a paid Purchase for that lesson's course (not a path-segment token like the Material download route, since one course purchase must unlock every lesson's file, not just one).
-- `src/app/api/download/[token]/route.ts`: **required fix, not optional** — `purchase.material` is now nullable per the schema change, and the existing null-unsafe access (`material.fileUrl`) became a real TypeScript build error. Added `|| !purchase.material` to the existing not-found check. This is the only change to previously-shipped Material code.
-- `src/components/site-header.tsx`, `site-footer.tsx`, `src/app/admin/layout.tsx`: added Courses nav entries, appended last, matching the existing pattern.
-- `src/app/admin/page.tsx`: split the single `paidPurchaseCount` into `paidMaterialPurchaseCount` (filtered `materialId: { not: null }`) and `paidCoursePurchaseCount` (filtered `courseId: { not: null }`), since after this change the old unfiltered query would have silently folded course sales into a card labeled "Paid materials sold." Added a `courseCount` query and two new dashboard cards.
 
-## Notes / deviations from spec
-- **Discovered side effect, not something the spec anticipated:** making `Purchase.materialId` optional caused Prisma to default that relation's `onDelete` behavior from `RESTRICT` (the previous, implicit behavior for a required relation) to `SET NULL` (Prisma's default for optional relations) — see the generated migration's `ALTER TABLE "Purchase"` / `AddForeignKey` statements. **This means deleting a Material that has existing purchase history now succeeds and orphans those Purchase rows' `materialId` to `null`, instead of being blocked by the FK constraint as it was before this change.** The spec's edge case assumed unchanged "FK constraint blocks it" behavior for Material deletion; that assumption no longer holds, purely as an automatic consequence of the exact schema change the spec asked for (not a coder choice). Flagging prominently for reviewer — did not attempt to restore the old `Restrict` behavior since that wasn't asked for and is a judgment call (orphaning vs. blocking deletion) rather than an obvious bug fix.
-- Added a `_count.lessons` column to the admin courses list table (`src/app/admin/courses/page.tsx`) alongside the spec'd `_count.purchases` column — not explicitly listed in the spec's file-by-file description, but directly serves "mirror the Material list page exactly" (Material's list shows a `_count.purchases`-derived "Downloads" column) adapted with the one piece of information a Course list has that a Material list doesn't (how many lessons exist), so admins can see at a glance whether a course still needs content. Minimal, tightly justified, not a design choice made independently of the spec's own instructions.
-- Added a defensive `lesson.courseId !== id` check in the lesson edit page (404s if a lesson is requested under the wrong course's URL) — not explicitly spec'd, but a natural, low-risk safeguard for a new nested-URL pattern, consistent with `notFound()` checks used throughout the rest of the admin.
-- Everything else matches the spec exactly, including the two explicitly-out-of-scope items (no user accounts, no quiz/certificate integration) — neither was touched.
+### Schema / data
+- `prisma/schema.prisma`: added `User` model (email, username, passwordHash, sessionVersion, failedLoginAttempts, lockedUntil, resetToken, resetTokenExpiresAt).
+- `prisma/migrations/20260721161054_add_users/`: migration for the above, generated and applied against a real local Postgres instance.
+
+### Core libraries
+- `src/lib/password.ts` (new): scrypt-based password hashing/verification, zero new dependencies (`crypto.scrypt` + `crypto.timingSafeEqual`).
+- `src/lib/user-session.ts` (new): jose/JWT httpOnly-cookie session, cookie name `fcr_user_session`, fully independent of the admin session (`fcr_admin_session`). Payload carries `sessionVersion` so changing/resetting a password invalidates all other outstanding sessions without a server-side blocklist.
+- `src/lib/dal.ts`: added `requireUser()` alongside the existing `requireAdmin()`.
+- `src/lib/email.ts` (new): Resend wrapper mirroring `src/lib/stripe.ts`'s `isStripeConfigured()` pattern — `isResendConfigured()` / `getResend()` / `EMAIL_FROM`. Degrades gracefully (server-side `console.error`, generic success response to the client) when `RESEND_API_KEY` is unset.
+
+### Routes
+- `src/app/signup/{actions.ts,signup-form.tsx,page.tsx}`: email + username + password signup, duplicate-email/username rejected with one generic message (no field-level enumeration).
+- `src/app/login/{actions.ts,login-form.tsx,page.tsx}`: login by username OR email. Database-backed brute-force lockout (5 failed attempts → 15 min lockout on the `User` row) — no in-memory state, safe for Vercel's serverless model.
+- `src/app/account/{actions.ts,change-password-form.tsx,page.tsx}`: account info display, change-password (re-issues a fresh session for the current browser while bumping `sessionVersion` to invalidate all other sessions), logout.
+- `src/app/account/forgot-username/{actions.ts,forgot-username-form.tsx,page.tsx}`: always returns a generic success message regardless of whether the email exists.
+- `src/app/account/forgot-password/{actions.ts,forgot-password-form.tsx,page.tsx}`: generates a 1-hour single-use reset token (nanoid), same generic-response posture as forgot-username.
+- `src/app/account/reset-password/{actions.ts,page.tsx,reset-password-form.tsx}`: `page.tsx` server-checks the token before rendering anything — invalid/expired tokens get a message and no form at all; valid tokens render the form. Completing the reset clears the token (single-use), bumps `sessionVersion`, and auto-logs the user in.
+
+### Header
+- `src/components/site-header.tsx`: converted to `async function SiteHeader()`, reads `verifyUserSession()` (never redirects) to show Log In/Sign Up when logged out, or My Account/Log out when logged in.
+
+### Config
+- `.env.example`: documented `USER_SESSION_SECRET` (required) and `RESEND_API_KEY`/`EMAIL_FROM` (optional).
+
+## Bug found and fixed during verification
+`requireUser()` originally called `destroyUserSession()` (a cookie write) when it detected a stale `sessionVersion` — but that check runs during a Server Component render (e.g. loading `/account`), and Next.js throws `Cookies can only be modified in a Server Action or Route Handler` if you mutate cookies there. This surfaced as a real "A server error occurred" page, not a redirect, the first time an old session was reused after a password change/reset. Fixed by dropping the cookie-clear and just redirecting to `/login` — the stale cookie is harmless since every future request re-runs the same check, and it's overwritten the next time the user actually logs in.
+
+## Side effect (expected, verified)
+Every route in the app is now server-rendered on demand (`ƒ`) instead of some being static (`○`) — confirmed in the `next build` output. This is expected: `SiteHeader` is in the root layout and now reads the session cookie on every request, so no page under it can be statically prerendered anymore. Not a regression to fix, just documented per the original spec's callout.
+
+## Explicitly out of scope (documented follow-ups, not built)
+- Linking existing anonymous Course/Material `Purchase` records to logged-in accounts ("my courses" library).
+- Any Cloudflare Turnstile/CAPTCHA integration — still an open decision with the site owner.
 
 ## Build/lint status
-- `npm run lint`: pass, no output.
-- `npm run build`: pass, against a real Postgres instance — confirmed only after fixing the `purchase.material` null-check TypeScript error described above (build genuinely failed once, was fixed, re-verified passing).
-- **Explicitly verified the existing Material free-download flow still works after the schema change** (not just assumed): drove the real form via Playwright, confirmed the resulting `/api/download/[token]` request returns `307` (redirect to the seeded external file URL), matching pre-existing behavior exactly.
-- **Verified the new Course flow end-to-end via Playwright, driving real forms against a real running server, not just unit-level checks:**
-  - Admin created a course and a lesson with content (two paragraphs), a video URL, and an uploaded file — all three optional fields exercised together.
-  - **Locked course view**: confirmed the lesson title is shown, and confirmed by inspecting the actual rendered HTML that neither the lesson's text content, nor a rendered video iframe, appear anywhere in the page source when locked (not just "hidden via CSS" — genuinely absent from the response).
-  - **Free unlock flow**: completed the name+email form, landed on `/courses/[id]?token=...`, confirmed both paragraphs of lesson content now render.
-  - **Lesson file download security**: downloading with the valid token returned `200` with byte-for-byte matching file content; the identical URL with the token swapped for garbage returned `404`.
-  - **Paid course, Stripe not configured**: confirmed the same friendly "Online payments aren't set up yet..." message Material already shows, not a raw error.
+- `npm run lint`: pass, no warnings.
+- `npm run build` (against a real local Postgres): pass. Migration applies cleanly, `next build` compiles and typechecks with no errors.
+- Manual/Playwright verification against `next start` (production build) on a real local Postgres instance, exercising: signup, duplicate-signup rejection, header auth-state in both directions, login by username and by email, 5-failed-attempt lockout and the lockout message, correct password still rejected while locked, login succeeding once lockout clears, change-password (current session stays logged in, other sessions invalidated by `sessionVersion`), forgot-username and forgot-password in the Resend-not-configured degraded mode (generic success message, no enumeration, no crash), full reset-password flow including invalid-token and single-use-token rejection, and cross-session invalidation after a password reset. All 27 checks passed.

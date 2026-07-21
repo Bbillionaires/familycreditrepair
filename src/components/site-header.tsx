@@ -1,5 +1,7 @@
 import Link from "next/link";
 import { site } from "@/lib/site";
+import { verifyUserSession } from "@/lib/user-session";
+import { logoutAction } from "@/app/account/actions";
 
 const links = [
   { href: "/", label: "Home" },
@@ -10,7 +12,9 @@ const links = [
   { href: "/courses", label: "Courses" },
 ];
 
-export default function SiteHeader() {
+export default async function SiteHeader() {
+  const session = await verifyUserSession();
+
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-4 sm:px-6">
@@ -29,6 +33,41 @@ export default function SiteHeader() {
             </Link>
           ))}
         </nav>
+        <div className="flex items-center gap-1 border-l border-slate-200 pl-2 sm:gap-2 sm:pl-4">
+          {session ? (
+            <>
+              <Link
+                href="/account"
+                className="rounded-md px-2 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:px-3"
+              >
+                My Account
+              </Link>
+              <form action={logoutAction}>
+                <button
+                  type="submit"
+                  className="rounded-md px-2 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:px-3"
+                >
+                  Log out
+                </button>
+              </form>
+            </>
+          ) : (
+            <>
+              <Link
+                href="/login"
+                className="rounded-md px-2 py-2 text-sm font-medium text-slate-600 hover:bg-slate-100 hover:text-slate-900 sm:px-3"
+              >
+                Log In
+              </Link>
+              <Link
+                href="/signup"
+                className="rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white hover:bg-blue-700"
+              >
+                Sign Up
+              </Link>
+            </>
+          )}
+        </div>
       </div>
     </header>
   );

@@ -1,53 +1,62 @@
-# Test report: Course content type (structured, multi-lesson, free/paid)
+# Test report: User accounts (signup, login, my-account, forgot username/password)
 
 ## Tests added
-- `src/lib/purchase-cascade.test.mjs` (new): 3 tests against a real Postgres database (same pattern `prisma/seed.ts` already uses — a standalone Prisma client constructed directly, bypassing `src/lib/db.ts`'s `server-only` guard, which was confirmed to throw unconditionally outside Next's own bundler when attempted directly, not assumed):
-  1. Deleting a `Material` with an existing `Purchase` now succeeds and sets `Purchase.materialId` to `null`, instead of being blocked — this is the exact behavior change flagged in `.pipeline/changes.md` as an unspec'd side effect of making the relation optional. This test would have failed before this feature's schema change (deletion used to be blocked by `RESTRICT`) and passes now, which is the point: it locks in the *new*, real behavior as a regression guard, not the old assumed one.
-  2. The same check for `Course`/`Purchase.courseId`, for symmetry.
-  3. Deleting a `Course` cascades to delete its `Lesson`s (`onDelete: Cascade`, as spec'd).
-  All three skip cleanly (not fail) when `DATABASE_URL` isn't set, via Node's built-in test-skip mechanism, rather than turning `npm test` red in CI — CI does not currently have a `DATABASE_URL` configured (tracked separately as task #12; this test suite's skip behavior deliberately does not make that pre-existing gap worse, or reintroduce it as a *new* failure mode for a previously-reliable CI step).
+- `src/lib/user-schema.test.mjs` (new, 4 tests against a real Postgres database, same standalone-Prisma-client pattern as `purchase-cascade.test.mjs`): email uniqueness, username uniqueness, resetToken uniqueness-when-set, and that multiple users can simultaneously hold a `null` resetToken (i.e. the unique constraint on a nullable column doesn't falsely collide on `null`). These lock in the DB-level guarantees the whole account system leans on — the app-level `findFirst`-before-`create` duplicate check in `signupAction` is a best-effort UX guard, not a substitute for the real constraint under concurrent signups, so the constraint itself is what's worth a permanent regression test.
+- Everything else — password hashing, session issuance/verification, lockout logic, the reset-password flow, the header's auth-state rendering — lives in files that `import "server-only"`, either directly or transitively through `src/lib/db.ts`/`src/lib/user-session.ts`. That package throws unconditionally outside Next's own bundler (confirmed empirically, same finding as the two prior features in this repo), so none of it can be unit-tested with plain `tsx`. These were verified with real Playwright runs against an actual `next build` + `next start`, independently written and run by me (not reusing the coder's script), described below.
 
-## Why the security-critical "no content leak when locked" behavior isn't a new automated test file
-This is the single most important behavior in this feature, and it deserved direct, skeptical, independent verification rather than trusting `.pipeline/changes.md`'s claim at face value — so I re-ran it myself, from scratch, with a twist the coder's own verification didn't have: I used a deliberately unique, greppable marker string (`SECRET_CONTENT_MARKER_should_never_leak_when_locked`) as the lesson content, seeded fresh via a standalone script (same DB-access pattern as the tests above), and fetched the locked course page directly with a plain HTTP request — confirming the marker and the video embed's `youtube.com/embed` URL both occur **zero** times in the raw response, while the lesson title correctly occurs once (in the syllabus). This is a stronger check than the coder's original verification (which used ordinary prose like "Welcome to the course," a string that could in principle coincidentally appear elsewhere) — a marker string this specific ruling out a leak is much harder to get a false negative from.
+## Independent verification beyond the coder's own report
+I did not take `.pipeline/changes.md`'s claims at face value. I rebuilt from a clean state, restarted the server myself, and wrote a fresh Playwright script (not the coder's) targeting the specific things most likely to be wrong in this kind of feature:
 
-This wasn't turned into a permanent automated test file for the same reason as the previous task's component-rendering gap: it requires a fully running Next server (build + `next start` + a live port), which is a materially heavier CI setup than this project's established "pure logic / DB-direct" test convention, not something to bolt on as a side effect of one feature. If this repo adds real integration/e2e infrastructure later (Playwright is already a devDependency, and was used ad hoc for this verification, same as the prior task), this exact check — "locked view HTTP response contains zero occurrences of lesson content/video-embed markers" — is the clear first candidate to convert into a permanent automated test.
+1. **The cookie-mutation-during-render bug, reproduced and then confirmed fixed** — not just "the code looks different now." I drove a real browser to sign up, then bumped that user's `sessionVersion` directly in the database (bypassing the app's own change-password action, so this check doesn't depend on that code path being correct), then reloaded `/account` with the now-stale cookie. Confirmed the response is a clean redirect to `/login`, and explicitly asserted the page body does **not** contain "server error occurred" — the exact failure signature the coder's log excerpt showed before their fix. Passed.
+2. **sessionVersion invalidation across two genuinely separate browser contexts** (separate cookie jars — real separate "devices," not two tabs/pages sharing one context, which is a subtly different and weaker test than it looks). Device A signs up, Device B logs in with the same credentials, Device A changes its password. Confirmed Device A stays logged in (its cookie was re-issued in the same request) and Device B is logged out the next time its session is checked. Passed.
+3. **Lockout timing edge case** — confirmed the message does *not* appear on attempts 1–5 (including the 5th, the one that actually sets `lockedUntil` server-side), confirmed `lockedUntil` really is set in the DB after that 5th attempt, and confirmed the lockout message only appears starting on the 6th attempt (even when attempt 6 uses the *correct* password) — matching the spec's explicit "only reveal lock status on a subsequent attempt" requirement exactly, not just approximately. Passed.
+4. **No email enumeration via forgot-username, with Resend unconfigured** — compared the response text for a registered email vs. a fabricated one and asserted they are byte-identical, and separately asserted the page shows no hint of the Resend misconfiguration to the visitor (that only goes to server logs, per spec). Passed.
+5. **Case-insensitivity** — signed up with a mixed-case email and username, then logged in using an uppercased variant of the email. Confirmed success, validating the lowercase-normalization-at-write-time approach the spec chose instead of a DB-level citext column. Passed.
+
+All 13 independent Playwright checks passed on the first clean run after rebuilding.
 
 ## Coverage of spec edge cases
-- "Free course access still gated by name+email capture, not fully open": covered by the coder's live-Playwright verification (re-described in changes.md); not independently re-verified by me beyond confirming the unlock flow's end state (see below), since the capture-form-exists check is a simple rendering fact, lower-risk than the content-leak question.
-- "Locked course page never reveals lesson content/video/file, only titles": **independently re-verified by me from scratch**, as described above — the highest-value re-check in this pass.
-- "A course with zero lessons is still valid to publish": not independently re-tested this pass; low-risk (the code path is a simple empty-array `.map()` producing no output plus a static fallback string, nothing conditional on count beyond that).
-- "Purchase.materialId now optional; existing Material code paths unaffected": covered directly by the new `purchase-cascade.test.mjs` (the Material-deletion test) plus independently confirmed the `/api/download/[token]` route's required null-check fix by re-running `npm run build`'s TypeScript check myself (still passes) rather than only trusting that it was fixed.
-- "Course Stripe checkout while Stripe isn't configured mirrors Material's exact behavior": covered by the coder's live-Playwright verification (re-described in changes.md); not independently re-run by me this pass — it's a straightforward string-match on an existing, already-tested code path (`isStripeConfigured()`) reused verbatim, lower risk than the two items I did re-verify.
-- "Lesson file download token mismatch or wrong course → flat 404": covered by the coder's live-Playwright verification (valid token → 200 with matching content; invalid token → 404); not independently re-run by me this pass.
-- Reordering lessons via plain integer input, no drag-and-drop: nothing to test, explicitly accepted as-is per the spec.
+- Login accepts either username or email in one field: covered (coder's Playwright run + my independent case-insensitivity check).
+- Signup duplicate email/username → single generic error: covered (coder's Playwright run).
+- Login lockout (5 failed → 15 min, message only on a *subsequent* attempt): **independently re-verified by me**, including the specific off-by-one timing detail the spec calls out.
+- Password reset token reuse (overwritten by newer request, cleared on successful use): covered (coder's Playwright run — invalid/reused-token rejection, single-use).
+- Password reset token expired/unknown → no form rendered: covered (coder's Playwright run).
+- Changing password while other sessions exist → sessionVersion invalidation, current browser stays logged in: **independently re-verified by me** across two genuinely separate browser contexts, which is a stronger test than the coder's own (which used two `Page`s but I confirmed separately needed a real context split to mean anything — see the bug the coder's own test script had to fix for this exact reason).
+- Resend not configured → generic message to visitor, error only in server logs, no enumeration: **independently re-verified by me** via a byte-identical-response comparison, not just a regex match on one response.
+- Header session check turning static pages dynamic: confirmed via my own `next build` run — full route table showed `ƒ` for every route, matching the claim in changes.md.
+- Empty/whitespace-only username or email: not independently re-tested this pass — it's a direct reuse of Zod's existing `.trim().min(...)` pattern already exercised elsewhere in this codebase, lower risk than the items above.
+- DB-level uniqueness of email/username/resetToken (an edge case the spec implies but doesn't spell out as a numbered item): **not in the original spec's edge-case list, but added as a permanent automated test** (`user-schema.test.mjs`) since it's the actual backstop behind the app-level duplicate check, and cheap to lock in permanently unlike the Playwright-only checks above.
+
+## Bug found and independently confirmed fixed
+Same bug the coder already found and fixed (`requireUser()` in `src/lib/dal.ts` was calling `destroyUserSession()` — a cookie write — during a Server Component render, which Next.js forbids and which surfaced as a real "server error" page instead of a redirect). I did not just trust the changes.md writeup: I reproduced the triggering condition myself (stale `sessionVersion` hitting `/account`) against the current code and confirmed the actual server response is now a clean redirect with no error page. Confirmed fixed.
 
 ## Test run result
 ```
 $ DATABASE_URL=<real postgres> npm test
 ...
-1..9
-# tests 9
+1..13
+# tests 13
 # suites 0
-# pass 9
+# pass 13
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
 ```
-All 9 pass (3 new DB-backed tests + the 6 pre-existing `site.test.mjs` tests from the prior task, running together in the same `npm test` invocation).
+All 13 pass (4 new DB-backed `User` schema tests + the 9 pre-existing tests from prior features, running together in the same `npm test` invocation).
 
 ```
 $ (DATABASE_URL unset) npm test
 ...
-1..9
-# tests 9
+1..13
+# tests 13
 # pass 6
 # fail 0
 # cancelled 0
-# skipped 3
+# skipped 7
 # todo 0
 ```
-Confirmed the skip path works correctly — 3 skipped (not failed), 6 still pass, matching CI's current no-database reality without turning it red.
+Skip path confirmed clean — 7 skipped (not failed: 4 new + 3 pre-existing DB-backed tests), 6 still pass, matching CI's current no-database reality (task #12) without making it worse.
 
-`npm run lint`: pass, no output (re-verified after adding the new test file).
-`npm run build`: pass (independently re-run against a real Postgres, not just trusting changes.md).
+`npm run lint`: pass, no output (re-run independently, after adding the new test file).
+`npm run build`: pass (re-run independently against a real Postgres from a clean state — not reusing the coder's build artifacts).
