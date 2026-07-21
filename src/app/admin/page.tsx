@@ -5,21 +5,32 @@ import { db } from "@/lib/db";
 export default async function AdminDashboard() {
   await requireAdmin();
 
-  const [testimonialCount, materialCount, classCount, signupCount, paidPurchaseCount] =
-    await Promise.all([
-      db.testimonial.count(),
-      db.material.count(),
-      db.classSession.count({ where: { startsAt: { gte: new Date() } } }),
-      db.signup.count(),
-      db.purchase.count({ where: { status: "paid", amountCents: { gt: 0 } } }),
-    ]);
+  const [
+    testimonialCount,
+    materialCount,
+    courseCount,
+    classCount,
+    signupCount,
+    paidMaterialPurchaseCount,
+    paidCoursePurchaseCount,
+  ] = await Promise.all([
+    db.testimonial.count(),
+    db.material.count(),
+    db.course.count(),
+    db.classSession.count({ where: { startsAt: { gte: new Date() } } }),
+    db.signup.count(),
+    db.purchase.count({ where: { status: "paid", amountCents: { gt: 0 }, materialId: { not: null } } }),
+    db.purchase.count({ where: { status: "paid", amountCents: { gt: 0 }, courseId: { not: null } } }),
+  ]);
 
   const cards = [
     { href: "/admin/testimonials", label: "Testimonials", value: testimonialCount },
     { href: "/admin/materials", label: "Materials", value: materialCount },
+    { href: "/admin/courses", label: "Courses", value: courseCount },
     { href: "/admin/classes", label: "Upcoming classes", value: classCount },
     { href: "/admin/classes", label: "Class signups", value: signupCount },
-    { href: "/admin/materials", label: "Paid materials sold", value: paidPurchaseCount },
+    { href: "/admin/materials", label: "Paid materials sold", value: paidMaterialPurchaseCount },
+    { href: "/admin/courses", label: "Paid courses sold", value: paidCoursePurchaseCount },
   ];
 
   return (

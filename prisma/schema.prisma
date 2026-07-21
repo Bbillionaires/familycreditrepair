@@ -63,17 +63,49 @@ model Signup {
   @@index([classSessionId])
 }
 
+model Course {
+  id          String     @id @default(cuid())
+  title       String
+  description String
+  priceCents  Int        @default(0)
+  imageUrl    String?
+  published   Boolean    @default(true)
+  sortOrder   Int        @default(0)
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+  lessons     Lesson[]
+  purchases   Purchase[]
+}
+
+model Lesson {
+  id        String   @id @default(cuid())
+  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId  String
+  title     String
+  order     Int      @default(0)
+  content   String?
+  videoUrl  String?
+  fileUrl   String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([courseId])
+}
+
 model Purchase {
-  id              String   @id @default(cuid())
-  material        Material @relation(fields: [materialId], references: [id])
-  materialId      String
+  id              String    @id @default(cuid())
+  material        Material? @relation(fields: [materialId], references: [id])
+  materialId      String?
+  course          Course?   @relation(fields: [courseId], references: [id])
+  courseId        String?
   name            String
   email           String
   amountCents     Int
-  stripeSessionId String   @unique
-  status          String   @default("pending")
-  downloadToken   String   @unique
-  createdAt       DateTime @default(now())
+  stripeSessionId String    @unique
+  status          String    @default("pending")
+  downloadToken   String    @unique
+  createdAt       DateTime  @default(now())
 
   @@index([materialId])
+  @@index([courseId])
 }

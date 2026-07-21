@@ -15,7 +15,7 @@ export async function GET(
     include: { material: true },
   });
 
-  if (!purchase || purchase.status !== "paid") {
+  if (!purchase || purchase.status !== "paid" || !purchase.material) {
     return NextResponse.json({ error: "Download not found or not available" }, { status: 404 });
   }
 

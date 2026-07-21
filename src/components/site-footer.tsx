@@ -17,6 +17,7 @@ export default function SiteFooter() {
               <li><Link href="/materials" className="hover:text-slate-900">Free &amp; Paid Resources</Link></li>
               <li><Link href="/calendar" className="hover:text-slate-900">Classes &amp; Calendar</Link></li>
               <li><Link href="/free-credit-reports" className="hover:text-slate-900">Free Credit Reports</Link></li>
+              <li><Link href="/courses" className="hover:text-slate-900">Courses</Link></li>
             </ul>
           </div>
           <div>

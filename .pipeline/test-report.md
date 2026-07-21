@@ -1,40 +1,53 @@
-# Test report: Free annual credit report info page
+# Test report: Course content type (structured, multi-lesson, free/paid)
 
 ## Tests added
-- `src/lib/site.ts` did NOT exist as a `.test.ts` file before this change (no test framework existed in this repo at all — verified via `package.json` and a repo-wide search for `*.test.*`/`*.spec.*`, both came back empty).
-- `src/lib/site.test.mjs` (new): 6 tests covering `site.creditReportDisclaimer`'s required content (exact phone number, exact URL, non-affiliation statement, no-PII-storage statement, phishing warning) plus a regression check that the two pre-existing disclaimer strings (`freeClassesDisclaimer`, `generalDisclaimer`) are untouched.
-- `package.json`: added a `"test"` script (`node --import tsx --test src/**/*.test.mjs`) using Node's built-in test runner + the `tsx` loader — both already present in this project (Node 22, `tsx` already a devDependency) — zero new npm packages installed for this.
-- `.github/workflows/ci.yml`: added `npm test` as a CI step, positioned *before* `npm run build` (see Notes below for why the ordering matters here specifically).
+- `src/lib/purchase-cascade.test.mjs` (new): 3 tests against a real Postgres database (same pattern `prisma/seed.ts` already uses — a standalone Prisma client constructed directly, bypassing `src/lib/db.ts`'s `server-only` guard, which was confirmed to throw unconditionally outside Next's own bundler when attempted directly, not assumed):
+  1. Deleting a `Material` with an existing `Purchase` now succeeds and sets `Purchase.materialId` to `null`, instead of being blocked — this is the exact behavior change flagged in `.pipeline/changes.md` as an unspec'd side effect of making the relation optional. This test would have failed before this feature's schema change (deletion used to be blocked by `RESTRICT`) and passes now, which is the point: it locks in the *new*, real behavior as a regression guard, not the old assumed one.
+  2. The same check for `Course`/`Purchase.courseId`, for symmetry.
+  3. Deleting a `Course` cascades to delete its `Lesson`s (`onDelete: Cascade`, as spec'd).
+  All three skip cleanly (not fail) when `DATABASE_URL` isn't set, via Node's built-in test-skip mechanism, rather than turning `npm test` red in CI — CI does not currently have a `DATABASE_URL` configured (tracked separately as task #12; this test suite's skip behavior deliberately does not make that pre-existing gap worse, or reintroduce it as a *new* failure mode for a previously-reliable CI step).
 
-## Why component-level rendering isn't covered by an automated test
-Attempted to render `DisclaimerBanner` and the new page directly via `react-dom/server`'s `renderToStaticMarkup` (already a transitive dependency, no new package needed) outside Next's build pipeline, to actually assert on rendered HTML (e.g. "phone number is not inside an `<a href=\"tel:...\">`"). This failed with a module-interop error — the `@/lib/site` path alias these components import doesn't resolve correctly when the component is loaded outside Next's own bundler (`tsconfig.json`'s `"moduleResolution": "bundler"` is designed for Next/webpack, not standalone `tsx` execution). Fighting that resolution mismatch to stand up component-level rendering tests, in a repo with zero existing test infra, is disproportionate to one static page — matches the explicit instruction not to bolt on heavy new infrastructure here.
+## Why the security-critical "no content leak when locked" behavior isn't a new automated test file
+This is the single most important behavior in this feature, and it deserved direct, skeptical, independent verification rather than trusting `.pipeline/changes.md`'s claim at face value — so I re-ran it myself, from scratch, with a twist the coder's own verification didn't have: I used a deliberately unique, greppable marker string (`SECRET_CONTENT_MARKER_should_never_leak_when_locked`) as the lesson content, seeded fresh via a standalone script (same DB-access pattern as the tests above), and fetched the locked course page directly with a plain HTTP request — confirming the marker and the video embed's `youtube.com/embed` URL both occur **zero** times in the raw response, while the lesson title correctly occurs once (in the syllabus). This is a stronger check than the coder's original verification (which used ordinary prose like "Welcome to the course," a string that could in principle coincidentally appear elsewhere) — a marker string this specific ruling out a leak is much harder to get a false negative from.
 
-This gap is covered by other, non-unit-test means instead of being silently uncovered:
-- TypeScript type-checking (`npm run build`'s `Running TypeScript` step) already catches signature-level breakage to `DisclaimerBanner`'s new `children` prop or the page component.
-- `.pipeline/changes.md` records that the coder manually verified, against a real running production server: both existing `DisclaimerBanner` call sites (`/`, `/calendar`) still render `freeClassesDisclaimer` unchanged, the new page renders all three required content strings, and — the specific thing that would've been the point of the rendering test — the rendered HTML contains **zero** `href="tel:` or `href="..annualcreditreport.."` occurrences, confirmed by grepping the actual server response.
+This wasn't turned into a permanent automated test file for the same reason as the previous task's component-rendering gap: it requires a fully running Next server (build + `next start` + a live port), which is a materially heavier CI setup than this project's established "pure logic / DB-direct" test convention, not something to bolt on as a side effect of one feature. If this repo adds real integration/e2e infrastructure later (Playwright is already a devDependency, and was used ad hoc for this verification, same as the prior task), this exact check — "locked view HTTP response contains zero occurrences of lesson content/video-embed markers" — is the clear first candidate to convert into a permanent automated test.
 
 ## Coverage of spec edge cases
-- "Do not hyperlink the phone number or annualcreditreport.com": not covered by an automated test (see above) — covered by coder's manual grep-the-real-response verification instead. If a future automated test suite adds real browser/Playwright-driven page tests, this is the first thing worth automating.
-- "No forms, no client-side JS on this page": implicitly enforced — the page file has no `"use client"` directive and no form elements; `npm run build`'s route-type output (`○ /free-credit-reports`, static) is itself evidence there's nothing dynamic on the page, since a page needing runtime interactivity/data wouldn't build as fully static.
-- "Existing DisclaimerBanner call sites render byte-for-byte identical output": covered directly by this test suite's regression test (`freeClassesDisclaimer`/`generalDisclaimer` content check) plus coder's manual server-response verification of the actual rendered pages.
-- "Mobile nav crowding is an accepted limitation, not a defect": nothing to test here by design — noting it's intentionally out of scope, not overlooked.
+- "Free course access still gated by name+email capture, not fully open": covered by the coder's live-Playwright verification (re-described in changes.md); not independently re-verified by me beyond confirming the unlock flow's end state (see below), since the capture-form-exists check is a simple rendering fact, lower-risk than the content-leak question.
+- "Locked course page never reveals lesson content/video/file, only titles": **independently re-verified by me from scratch**, as described above — the highest-value re-check in this pass.
+- "A course with zero lessons is still valid to publish": not independently re-tested this pass; low-risk (the code path is a simple empty-array `.map()` producing no output plus a static fallback string, nothing conditional on count beyond that).
+- "Purchase.materialId now optional; existing Material code paths unaffected": covered directly by the new `purchase-cascade.test.mjs` (the Material-deletion test) plus independently confirmed the `/api/download/[token]` route's required null-check fix by re-running `npm run build`'s TypeScript check myself (still passes) rather than only trusting that it was fixed.
+- "Course Stripe checkout while Stripe isn't configured mirrors Material's exact behavior": covered by the coder's live-Playwright verification (re-described in changes.md); not independently re-run by me this pass — it's a straightforward string-match on an existing, already-tested code path (`isStripeConfigured()`) reused verbatim, lower risk than the two items I did re-verify.
+- "Lesson file download token mismatch or wrong course → flat 404": covered by the coder's live-Playwright verification (valid token → 200 with matching content; invalid token → 404); not independently re-run by me this pass.
+- Reordering lessons via plain integer input, no drag-and-drop: nothing to test, explicitly accepted as-is per the spec.
 
 ## Test run result
 ```
-$ npm test
+$ DATABASE_URL=<real postgres> npm test
 ...
-1..6
-# tests 6
+1..9
+# tests 9
 # suites 0
-# pass 6
+# pass 9
 # fail 0
 # cancelled 0
 # skipped 0
 # todo 0
 ```
-All 6 pass.
+All 9 pass (3 new DB-backed tests + the 6 pre-existing `site.test.mjs` tests from the prior task, running together in the same `npm test` invocation).
 
-`npm run lint`: pass, no output (re-verified after this change).
+```
+$ (DATABASE_URL unset) npm test
+...
+1..9
+# tests 9
+# pass 6
+# fail 0
+# cancelled 0
+# skipped 3
+# todo 0
+```
+Confirmed the skip path works correctly — 3 skipped (not failed), 6 still pass, matching CI's current no-database reality without turning it red.
 
-## Notes for reviewer (pre-existing issue discovered, not caused by this feature)
-`npm run build` (`prisma migrate deploy && next build`) requires a reachable `DATABASE_URL`/`DATABASE_URL_UNPOOLED`. GitHub Actions' `ci.yml` has no such secret configured. Reproduced directly: with those env vars genuinely unset (temporarily moved the local `.env` file aside so `dotenv/config` couldn't repopulate them), `prisma migrate deploy` fails immediately with `"The datasource.url property is required in your Prisma config file when using prisma migrate deploy."` This means CI's build step has almost certainly been failing on every push since task #10's SQLite→Postgres migration, independent of this feature. I positioned the new `npm test` step *before* `npm run build` in the workflow specifically so it still runs and reports clearly even though the later build step is likely red — otherwise my new tests would never execute in CI at all (GitHub Actions stops a job at the first failing step by default). Fixing the underlying CI/DATABASE_URL gap itself (e.g. a Postgres service container in the workflow, or a repo secret) is a real, separate task — flagging for your recommendation on next steps rather than fixing it here, since it's out of scope for "add tests for the credit report page."
+`npm run lint`: pass, no output (re-verified after adding the new test file).
+`npm run build`: pass (independently re-run against a real Postgres, not just trusting changes.md).
