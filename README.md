@@ -1,4 +1,4 @@
-# Family Credit Repair — Free Credit Education Site
+# CreditCareCourse.com — Free Credit Education Site
 
 A Next.js site for a free credit-education program: video testimonials, a
 library of free and paid downloadable materials, and a signup calendar for
