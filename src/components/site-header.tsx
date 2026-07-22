@@ -21,12 +21,11 @@ export default async function SiteHeader() {
         <div className="flex items-center justify-between">
           <Link href="/" className="flex items-baseline gap-2">
             <span
-              className="animate-logo-shimmer bg-clip-text text-lg font-bold text-transparent [-webkit-text-stroke:0.3px_rgba(30,64,175,0.25)]"
+              className="animate-logo-shimmer bg-clip-text text-2xl font-bold tracking-wide text-transparent [-webkit-text-stroke:0.3px_rgba(30,64,175,0.25)] sm:text-3xl"
               style={{ backgroundImage: "linear-gradient(90deg, #2563eb, #ffffff, #dc2626, #ffffff, #2563eb)" }}
             >
               {site.name}
             </span>
-            <span className="hidden text-sm text-slate-500 sm:inline">{site.shortName}</span>
           </Link>
           <div className="flex items-center gap-1 sm:gap-2">
             {session ? (
