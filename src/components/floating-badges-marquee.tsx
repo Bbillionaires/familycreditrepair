@@ -1,10 +1,12 @@
-// Full-width background layer that drifts slowly across the entire hero
-// section, behind the headline/CTAs/illustration. Each image below is
-// expected at /public/images/hero-badges/<file> — drop matching files in
-// that folder (200x70px display size, transparent PNG/WebP, export at
-// 400x140 for retina) and they'll appear automatically. Until a file
-// exists, its slot just renders a broken-image icon — harmless, and easy
-// to spot which ones are still missing.
+// Fixed, viewport-anchored background layer that drifts slowly across the
+// entire site (every public page — rendered once from the root layout, not
+// per-page), sitting behind normal page content via a negative z-index. It
+// naturally shows through wherever a page has no opaque background of its
+// own (margins, gaps between cards) and stays hidden behind anything that
+// does (forms, tables, cards) — no per-page changes needed. Each image
+// below is expected at /public/images/hero-badges/<file> — drop matching
+// files in that folder (200x70px display size, transparent PNG/WebP, export
+// at 400x140 for retina) and they'll appear automatically.
 const BADGES = [
   { src: "/images/hero-badges/750-equifax.png", alt: "750 Equifax" },
   { src: "/images/hero-badges/800-experian.png", alt: "800 Experian" },
@@ -21,7 +23,7 @@ export default function FloatingBadgesMarquee() {
   return (
     <div
       aria-hidden="true"
-      className="pointer-events-none absolute inset-0 z-0 flex items-center overflow-hidden opacity-30 grayscale"
+      className="pointer-events-none fixed inset-0 -z-10 flex items-center overflow-hidden opacity-30 grayscale"
     >
       <div className="animate-marquee flex w-max shrink-0 items-center gap-10">
         {TRACK.map((badge, i) => (

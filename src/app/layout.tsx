@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import SiteHeader from "@/components/site-header";
 import SiteFooter from "@/components/site-footer";
+import SiteBackgroundMarquee from "@/components/site-background-marquee";
 import { site } from "@/lib/site";
 import "./globals.css";
 
@@ -31,6 +32,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-white text-slate-900">
+        <SiteBackgroundMarquee />
         <SiteHeader />
         <main className="flex-1">{children}</main>
         <SiteFooter />

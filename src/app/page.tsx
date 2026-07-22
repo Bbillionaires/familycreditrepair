@@ -4,7 +4,6 @@ import { site } from "@/lib/site";
 import DisclaimerBanner from "@/components/disclaimer-banner";
 import VideoEmbed from "@/components/video-embed";
 import HomeownershipHeroGraphic from "@/components/homeownership-hero-graphic";
-import FloatingBadgesMarquee from "@/components/floating-badges-marquee";
 import { formatClassDate, formatMoney } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
@@ -30,44 +29,41 @@ export default async function Home() {
 
   return (
     <div>
-      <section className="relative overflow-hidden">
-        <FloatingBadgesMarquee />
-        <div className="relative z-10 mx-auto max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
-          <div className="grid items-center gap-10 lg:grid-cols-2">
-            <div className="max-w-2xl">
-              <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
-                {site.tagline}
-              </h1>
-              <p className="mt-4 text-lg text-slate-600">
-                We teach families how credit works through free live classes, real
-                testimonials, and practical guides &mdash; so you can make informed
-                decisions with confidence.
-              </p>
-              <div className="mt-8 flex flex-wrap gap-3">
-                <Link
-                  href="/calendar"
-                  className="rounded-md bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
-                >
-                  Sign up for a free class
-                </Link>
-                <Link
-                  href="/materials"
-                  className="rounded-md border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
-                >
-                  Browse free &amp; paid resources
-                </Link>
-              </div>
-              <div className="mt-8">
-                <DisclaimerBanner />
-              </div>
+      <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
+        <div className="grid items-center gap-10 lg:grid-cols-2">
+          <div className="max-w-2xl">
+            <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
+              {site.tagline}
+            </h1>
+            <p className="mt-4 text-lg text-slate-600">
+              We teach families how credit works through free live classes, real
+              testimonials, and practical guides &mdash; so you can make informed
+              decisions with confidence.
+            </p>
+            <div className="mt-8 flex flex-wrap gap-3">
+              <Link
+                href="/calendar"
+                className="rounded-md bg-blue-600 px-5 py-3 text-sm font-semibold text-white hover:bg-blue-700"
+              >
+                Sign up for a free class
+              </Link>
+              <Link
+                href="/materials"
+                className="rounded-md border border-slate-300 px-5 py-3 text-sm font-semibold text-slate-700 hover:bg-slate-50"
+              >
+                Browse free &amp; paid resources
+              </Link>
             </div>
-            <div>
-              <HomeownershipHeroGraphic />
-              <p className="mx-auto mt-2 max-w-md text-center text-xs text-slate-400">
-                Illustrative example only &mdash; not a guarantee of your results, and we
-                are not affiliated with Equifax, Experian, or TransUnion.
-              </p>
+            <div className="mt-8">
+              <DisclaimerBanner />
             </div>
+          </div>
+          <div>
+            <HomeownershipHeroGraphic />
+            <p className="mx-auto mt-2 max-w-md text-center text-xs text-slate-400">
+              Illustrative example only &mdash; not a guarantee of your results, and we
+              are not affiliated with Equifax, Experian, or TransUnion.
+            </p>
           </div>
         </div>
       </section>
