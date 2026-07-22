@@ -72,6 +72,10 @@ export async function loginAction(
     data: { failedLoginAttempts: 0, lockedUntil: null },
   });
 
-  await createUserSession(user.id, user.sessionVersion);
+  try {
+    await createUserSession(user.id, user.sessionVersion);
+  } catch (err) {
+    return { error: `Couldn't start your session: ${err instanceof Error ? err.message : String(err)}` };
+  }
   redirect("/account");
 }
