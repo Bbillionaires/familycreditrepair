@@ -32,22 +32,54 @@ body {
   animation: gentle-float 7s ease-in-out infinite;
 }
 
-@keyframes marquee {
-  from {
-    transform: translateX(0);
+/* Each scattered background badge drifts on its own small, organic path and
+   gently rocks around its own base rotation (set per-instance via the --rot
+   custom property), rather than every badge moving together in one line. */
+@keyframes float-scatter {
+  0% {
+    transform: translate(0, 0) rotate(var(--rot, 0deg));
   }
-  to {
-    transform: translateX(-50%);
+  25% {
+    transform: translate(10px, -16px) rotate(calc(var(--rot, 0deg) + 5deg));
+  }
+  50% {
+    transform: translate(-6px, -26px) rotate(var(--rot, 0deg));
+  }
+  75% {
+    transform: translate(-14px, -10px) rotate(calc(var(--rot, 0deg) - 5deg));
+  }
+  100% {
+    transform: translate(0, 0) rotate(var(--rot, 0deg));
   }
 }
 
-.animate-marquee {
-  animation: marquee 40s linear infinite;
+.animate-float-scatter {
+  animation-name: float-scatter;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+}
+
+/* Animated red/white/blue gradient text for the site wordmark in the header —
+   the gradient is wider than the text and slowly slides, so the letters
+   visibly shift color over time rather than sitting at one fixed color. */
+@keyframes logo-shimmer {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+.animate-logo-shimmer {
+  background-size: 200% auto;
+  animation: logo-shimmer 6s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
   .animate-gentle-float,
-  .animate-marquee {
+  .animate-float-scatter,
+  .animate-logo-shimmer {
     animation: none;
   }
 }
