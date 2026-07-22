@@ -22,20 +22,36 @@ export default function FreeCreditReportsPage() {
         <h2 className="text-xl font-semibold text-slate-900">How to order</h2>
         <div className="mt-4 grid gap-4 sm:grid-cols-3">
           <div className="rounded-lg border border-slate-200 p-4">
-            <p className="font-semibold text-slate-900">1-877-322-8228</p>
+            <a href="tel:+18773228228" className="font-semibold text-blue-600 hover:underline">
+              1-877-322-8228
+            </a>
             <p className="mt-1 text-sm text-slate-500">
               A 3-minute call. Reports for all three bureaus arrive by mail
               within about 15 days.
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 p-4">
-            <p className="font-semibold text-slate-900">annualcreditreport.com</p>
+            <a
+              href="https://www.annualcreditreport.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-blue-600 hover:underline"
+            >
+              annualcreditreport.com
+            </a>
             <p className="mt-1 text-sm text-slate-500">
               Request and often view your reports online the same day.
             </p>
           </div>
           <div className="rounded-lg border border-slate-200 p-4">
-            <p className="font-semibold text-slate-900">Mail-in request form</p>
+            <a
+              href="https://www.annualcreditreport.com/manualRequestForm.action"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="font-semibold text-blue-600 hover:underline"
+            >
+              Mail-in request form
+            </a>
             <p className="mt-1 text-sm text-slate-500">
               Print and mail the official request form if you&apos;d rather
               not call or go online; also takes about 15 days by mail.
