@@ -136,17 +136,17 @@ export default async function Home() {
             </div>
           </div>
           <div className="order-1 lg:order-2">
-            <div className="relative z-10 mx-auto w-full max-w-xs">
+            <div className="relative z-10 mx-auto w-full max-w-md overflow-hidden rounded-xl">
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
                 src="/images/credit-score-phone.webp"
                 alt="A phone showing a credit score breakdown, including payment history, credit utilization, credit age, credit mix, and new credit"
                 width={700}
-                height={831}
+                height={467}
                 className="w-full drop-shadow-sm"
               />
             </div>
-            <p className="mx-auto mt-2 max-w-xs text-center text-xs text-slate-400">
+            <p className="mx-auto mt-2 max-w-md text-center text-xs text-slate-400">
               Illustrative example only &mdash; not a guarantee of your results.
             </p>
           </div>
