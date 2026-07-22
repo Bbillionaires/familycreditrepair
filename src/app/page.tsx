@@ -32,14 +32,16 @@ export default async function Home() {
       <section className="mx-auto max-w-6xl px-4 py-16 sm:px-6 sm:py-24">
         <div className="grid items-center gap-10 lg:grid-cols-2">
           <div className="max-w-2xl">
-            <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
-              {site.tagline}
-            </h1>
-            <p className="mt-4 text-lg text-slate-600">
-              We teach families how credit works through free live classes, real
-              testimonials, and practical guides &mdash; so you can make informed
-              decisions with confidence.
-            </p>
+            <div className="rounded-2xl bg-white/95 p-6 shadow-sm ring-1 ring-slate-900/5 sm:p-8">
+              <h1 className="text-4xl font-bold tracking-tight text-slate-900 sm:text-5xl">
+                {site.tagline}
+              </h1>
+              <p className="mt-4 text-lg text-slate-600">
+                We teach families how credit works through free live classes, real
+                testimonials, and practical guides &mdash; so you can make informed
+                decisions with confidence.
+              </p>
+            </div>
             <div className="mt-8 flex flex-wrap gap-3">
               <Link
                 href="/calendar"
