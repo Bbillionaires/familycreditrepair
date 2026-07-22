@@ -36,7 +36,10 @@ const INSTANCES = [
 
 export default function FloatingBadgesMarquee() {
   return (
-    <div aria-hidden="true" className="pointer-events-none fixed inset-0 -z-10 overflow-hidden opacity-45">
+    <div
+      aria-hidden="true"
+      className="pointer-events-none fixed inset-0 -z-10 hidden overflow-hidden opacity-45 sm:block"
+    >
       {INSTANCES.map((instance, i) => (
         // eslint-disable-next-line @next/next/no-img-element
         <img
