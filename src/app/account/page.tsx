@@ -1,8 +1,12 @@
 import Link from "next/link";
 import { requireUser } from "@/lib/dal";
 import { db } from "@/lib/db";
+import { site } from "@/lib/site";
 import { formatClassDate } from "@/lib/format";
+import DisclaimerBanner from "@/components/disclaimer-banner";
 import ChangePasswordForm from "./change-password-form";
+import BecomeMemberForm from "./become-member-form";
+import ManageMembershipForm from "./manage-membership-form";
 import { logoutAction } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -74,6 +78,38 @@ export default async function AccountPage() {
         <p className="font-medium text-slate-900">{user.username}</p>
         <p className="mt-3 text-sm text-slate-500">Email</p>
         <p className="font-medium text-slate-900">{user.email}</p>
+      </div>
+
+      <div className="mt-6 rounded-lg border border-slate-200 p-5">
+        <h2 className="text-lg font-semibold text-slate-900">Membership</h2>
+        {user.isComped ? (
+          <p className="mt-2 text-sm text-slate-600">
+            You have complimentary membership access — thank you for being part of {site.name}.
+          </p>
+        ) : user.membershipStatus === "active" ? (
+          <>
+            <p className="mt-2 text-sm text-slate-600">You&apos;re a member ($9.99/month).</p>
+            <ManageMembershipForm />
+          </>
+        ) : (
+          <>
+            {user.membershipStatus === "past_due" && (
+              <p className="mt-2 text-sm text-amber-700">
+                Your last membership payment didn&apos;t go through.
+              </p>
+            )}
+            {user.membershipStatus === "canceled" && (
+              <p className="mt-2 text-sm text-slate-600">Your membership was canceled.</p>
+            )}
+            <p className="mt-2 text-sm text-slate-600">
+              Optional membership — $9.99 to join today, $9.99/month after.
+            </p>
+            <div className="mt-3">
+              <DisclaimerBanner>{site.membershipDisclaimer}</DisclaimerBanner>
+            </div>
+            <BecomeMemberForm />
+          </>
+        )}
       </div>
 
       <div className="mt-8">

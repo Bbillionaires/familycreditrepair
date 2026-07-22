@@ -8,4 +8,6 @@ export const site = {
     "This site is for educational purposes only and is not legal, financial, or credit repair advice, and does not guarantee any change to your credit score or report. Individual results discussed in testimonials are personal experiences and are not typical or guaranteed.",
   creditReportDisclaimer:
     "This page is educational only. We are not affiliated with Equifax, Experian, TransUnion, or AnnualCreditReport.com, and we never request, receive, or store your credit report, Social Security number, or any other personal identifying information on your behalf. The only official source for your free annual credit reports is annualcreditreport.com or 1-877-322-8228 — be wary of any other site or caller offering \"free credit reports\" that asks for payment or excessive personal information upfront.",
+  membershipDisclaimer:
+    "Membership is completely optional and never required — every free class, and any material marked Free, stays free whether or not you join. Membership is a way to support this project directly. It is not a credit repair service, does not guarantee any change to your credit score or report, and does not expedite anything else on this site. Cancel anytime.",
 };

@@ -93,17 +93,21 @@ model Lesson {
 }
 
 model User {
-  id                  String    @id @default(cuid())
-  email               String    @unique
-  username            String    @unique
-  passwordHash        String
-  sessionVersion      Int       @default(0)
-  failedLoginAttempts Int       @default(0)
-  lockedUntil         DateTime?
-  resetToken          String?   @unique
-  resetTokenExpiresAt DateTime?
-  createdAt           DateTime  @default(now())
-  updatedAt           DateTime  @updatedAt
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  username             String    @unique
+  passwordHash         String
+  sessionVersion       Int       @default(0)
+  failedLoginAttempts  Int       @default(0)
+  lockedUntil          DateTime?
+  resetToken           String?   @unique
+  resetTokenExpiresAt  DateTime?
+  isComped             Boolean   @default(false)
+  membershipStatus     String    @default("none")
+  stripeCustomerId     String?
+  stripeSubscriptionId String?   @unique
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
 }
 
 model Purchase {

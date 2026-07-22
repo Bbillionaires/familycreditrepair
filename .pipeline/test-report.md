@@ -1,48 +1,20 @@
-# Test report: My Account dashboard (linked Materials, Courses, Class Signups)
+# Test report: Optional $9.99/month membership (Stripe subscription)
 
 ## Tests added
-- `src/lib/account-dashboard.test.mjs` (new, 3 permanent tests against a real Postgres database, same standalone-Prisma-client pattern as `purchase-cascade.test.mjs`/`user-schema.test.mjs`): locks in the single highest-risk mechanism in this feature — the case-insensitive email match — independent of the page component, so a future edit that accidentally reverts `mode: "insensitive"` back to a plain equals fails a test rather than only being catchable by a manual QA pass using identically-cased emails (which would never expose the bug). One test also proves the *negative*: a plain equals genuinely does not match the differently-cased row, ruling out the insensitive-query test being a false positive from some unrelated cause. A third test locks in that `status: "pending"` rows are excluded from a `status: "paid"` filter.
-- Everything else in this feature (the actual `/account` page render, the dedupe logic, the upcoming/past split) lives in a Server Component that calls `requireUser()`, which is guarded by `"server-only"` transitively — cannot be unit-tested outside Next's bundler, consistent with this repo's established finding. Verified via real Playwright runs against `next build` + `next start` instead, both by the coder and independently by me (not reusing the coder's script), described below.
-
-## Independent verification beyond the coder's own report
-Read every line of the actual `src/app/account/page.tsx` (not just `changes.md`'s description) and confirmed all three queries (`materialPurchases`, `coursePurchases`, `signups`) genuinely use `{ equals: user.email, mode: "insensitive" }` — a single missed instance would have silently broken matching for any historically-different-cased purchase, which is exactly the kind of thing that's invisible in a quick happy-path test. Then wrote and ran my own Playwright script (not the coder's) targeting specifically the things most likely to be subtly wrong in this kind of feature:
-
-1. **Deleted-Material edge case, not covered by the coder's own test** — created a temporary Material, purchased it, deleted the Material (confirmed via direct DB read that `Purchase.materialId` really did get nulled by the existing `onDelete: SetNull` behavior, not just assumed), then confirmed the dashboard shows **no row at all** for it — not a broken/blank entry, and specifically confirmed "My materials" still renders its normal empty-state message rather than a phantom non-empty list with one invisible row. Passed.
-2. **Dedupe keeps the specific newest token, not just "a" row** — created three purchases of the same free Material with staggered `createdAt` timestamps (oldest, middle, newest), reloaded, and asserted: the material's title appears exactly once, the rendered "Download" link is `/api/download/<newest-token>` specifically, and explicitly asserted the link is **not** either of the two older tokens (a weaker test could pass by coincidence if dedupe kept the *first* array element while the array happened to already be sorted correctly — this test rules that out by checking the actual surviving token, not just row count). Passed.
-3. **Pending purchase never shows** — confirmed the material title from an in-progress (never-completed) paid checkout doesn't appear anywhere on the page. Passed.
-4. **Upcoming/Past sectioning verified via actual DOM structure, not text order** — the coder's own test checked that the upcoming class's title appeared before the word "Past" in the page's flattened text, which is weaker than it looks (a coincidental match elsewhere in surrounding text could pass or fail it for the wrong reason). I instead located each subsection's own container element via its heading (`Upcoming`/`Past` `<p>` tag → its following sibling `<div>`) and asserted the upcoming class's title is inside the Upcoming container **and explicitly absent** from the Past container, and vice versa for the past class. Passed.
-
-All 12 independent Playwright checks passed on a clean rebuild.
+- `src/lib/membership.test.mjs` (new, 8 tests): DB-direct tests against a real Postgres, following the established pattern in `account-dashboard.test.mjs`/`purchase-cascade.test.mjs`. Confirmed empirically (by first trying and failing) that the actual webhook route module (`src/app/api/stripe/webhook/route.ts`) cannot be imported into a plain Node test process — it transitively imports `src/lib/stripe.ts`, which has a top-level `import "server-only"` guard that throws unconditionally outside Next's own bundler, the same constraint `purchase-cascade.test.mjs` already documents for `src/lib/db.ts`. Each test instead performs the exact same Prisma `where`/`data` shape the webhook handler's source uses for that event type, against a standalone `PrismaClient` instance, so a regression in the underlying query/schema contract fails a test rather than only surfacing in production.
 
 ## Coverage of spec edge cases
-- Zero purchases/signups → three independent empty states: covered (coder's own test + implicitly exercised as the baseline state in every one of my scenarios above, since each new user starts from empty).
-- Deleted Material/Course leaves no row (not a placeholder): **independently re-verified by me**, including the DB-level sanity check that `onDelete: SetNull` really fired, which the coder's report didn't include.
-- Unpublished-but-not-deleted Material/Course still shown: not independently re-tested this pass — low risk, it's the absence of a check (`published` is never referenced in the query or the render), not a behavior that could regress silently; already covered by the coder's `changes.md` reasoning being directly verifiable by reading the code once, which I did.
-- Duplicate purchases dedupe to the most recent: **independently re-verified by me** with a stronger assertion (specific surviving token, not just row count) than the coder's own two-purchase test.
-- Pending/incomplete Stripe checkouts excluded: **independently re-verified**, plus locked in permanently via the new `status: "pending"` DB test.
-- Upcoming vs. past signup sectioning: **independently re-verified with a stronger, DOM-scoped assertion** than the coder's text-order check.
-- Email case mismatch between anonymous purchase/signup and the account's normalized email: **independently re-verified against real data**, plus locked in permanently via the two new case-insensitivity DB tests (Purchase and Signup), including a negative-control assertion that a plain equals genuinely fails so the insensitive-mode test isn't a false positive.
+- User is both comped and has a real Stripe subscription (either order): covered — "isComped and membershipStatus are independent" test confirms comping/un-comping never touches `membershipStatus`.
+- Webhook arrives for a user id / subscription id that doesn't exist: covered — "webhook write shape for an unknown user id / subscription id matches zero rows instead of throwing" confirms `updateMany` resolves to `{ count: 0 }`, never a throw.
+- Subscription lapses (past_due/canceled) must never affect free-content access: not covered by an automated test — this is an absence-of-behavior requirement (no code anywhere reads `membershipStatus` for access control), verified by reading every changed file rather than by a runtime test. Confirmed: `materials/actions.ts`, `courses/actions.ts`, `calendar/actions.ts` are untouched by this feature and contain no new membership checks.
+- Double-submission of "Become a member": not covered by an automated test — the guard (`user.isComped || user.membershipStatus === "active"` returning an error before creating a Checkout Session) lives in `startMembershipCheckout`, which calls `requireUser()` (needs a real request/cookie scope) and Stripe's live Checkout API (needs network + a real Stripe test-mode key) — neither is available in this repo's existing test harness for any of the other Stripe-backed actions either (materials/courses checkout aren't automated-tested this way either). Verified by reading the code directly.
+- Duplicate webhook delivery for the same event (idempotency): covered — "replaying the same checkout.session.completed write twice is idempotent" confirms both deliveries succeed and leave the same end state.
+- Admin un-comps a user who never paid: covered — same test as the first edge case above confirms `membershipStatus` stays `"none"`.
+- `stripeSubscriptionId` uniqueness: covered — new test confirms two different users can each hold their own subscription id, and that a duplicate assignment across users is rejected by the database's unique constraint.
+- New field defaults (`membershipStatus:"none"`, `isComped:false`): covered — explicit defaults test, not in the original spec's edge case list but worth locking in since the whole feature's "safe by default" behavior for existing/new users depends on it.
+- Env vars / Stripe Dashboard event subscription: not applicable to automated testing — this is a deployment configuration note, already flagged in `.pipeline/specs.md`'s edge cases for the site owner, not a code path.
 
 ## Test run result
-```
-$ DATABASE_URL=<real postgres> npm test
-1..16
-# tests 16
-# pass 16
-# fail 0
-# cancelled 0
-# skipped 0
-```
-All 16 pass (3 new DB-backed tests for this feature + the 13 pre-existing tests from prior features, running together in the same `npm test` invocation).
-
-```
-$ (DATABASE_URL unset) npm test
-1..16
-# pass 6
-# fail 0
-# skipped 10
-```
-Skip path confirmed clean — 10 skipped (not failed: 3 new + 7 pre-existing DB-backed tests), 6 still pass, matching CI's current no-database reality (task #12) without making it worse.
-
-`npm run lint`: pass, no output (re-run independently, after adding the new test file).
-`npm run build`: pass (re-run independently against a real Postgres from a clean state).
+- `npm test` (full suite, `DATABASE_URL` set to a real local Postgres): **24/24 pass, 0 fail.** No regressions in any pre-existing test file.
+- `node --import tsx --test src/lib/membership.test.mjs` standalone: 8/8 pass.
+- One transient failure during development: an earlier draft of this test file attempted to import the real webhook route module directly and hit the `server-only` guard (documented above); after rewriting to the DB-direct pattern, a second transient failure occurred from stale rows left behind by that earlier failed run (unique constraint on `email`) — cleaned up manually and confirmed zero `membership-test-*` rows remain after a full clean run. Both were resolved before this report; the committed test file has no known flakiness.

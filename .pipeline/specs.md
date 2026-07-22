@@ -1,167 +1,251 @@
-# Spec: My Account dashboard (linked Materials, Courses, Class Signups)
+# Spec: Optional $9.99/month membership (Stripe subscription)
 
 ## Summary
-Replace the current bare `/account` page (username, email, change-password form, logout) with a real dashboard that also shows the logged-in visitor's unlocked Materials, unlocked Courses, and class signups — the "my courses" feature explicitly deferred when the Course feature and User-accounts feature were originally built. `Purchase` and `Signup` rows are keyed by a free-text `email` field, not a `userId` foreign key, and were created anonymously before accounts existed. Link them to the logged-in user by querying `Purchase.email`/`Signup.email` against the current session's own `User.email` — always the user's own verified, authenticated email, never a user-supplied lookup value, so this is safe: a visitor only ever sees rows matching their own account. **No schema migration is needed or being made.** Confirmed by reading `src/app/materials/actions.ts`, `src/app/courses/actions.ts`, and `src/app/calendar/actions.ts`: their `EmailSchema` is `z.string().trim().email(...)` with **no `.toLowerCase()`**, unlike `User.email` which the signup flow normalizes to lowercase. This means historical `Purchase`/`Signup` rows may have mixed-case emails while `User.email` is always lowercase — so every lookup in this feature must use a case-insensitive match (Prisma's `{ equals: ..., mode: "insensitive" }`, supported on this Postgres datasource) rather than an exact-string match. This is a read-time fix; do not add a migration or attempt to normalize existing data.
+
+Add an optional, non-gating recurring "membership" ($9.99 charged today, $9.99 every month after) that logged-in users can start from `/account`. It is purely a voluntary support/commitment mechanism — no existing free content (classes, free materials) is ever gated by membership status, and no new gating logic should be added anywhere outside the `/account` membership section itself. Wording must follow the site's existing CROA-conscious disclaimer tone (see `src/lib/site.ts`, `src/components/disclaimer-banner.tsx`): membership is framed as voluntary support, never as something required for, or that expedites, any credit-repair outcome.
+
+Billing shape (confirmed): a standard Stripe subscription, `mode: "subscription"`, inline `price_data` with `recurring: { interval: "month" }`, `unit_amount: 999` — no separate one-time fee, the "first charge" is simply the subscription's first billing cycle. This mirrors the existing inline-`price_data` Checkout pattern already used for one-time Material/Course purchases (`src/app/materials/actions.ts`, `src/app/courses/actions.ts`) — no pre-created Stripe Price object needed, so no manual Stripe Dashboard setup for the price itself.
+
+Admins can toggle any user to `isComped = true` from a new `/admin/users` page — this waives billing indefinitely (no membership CTA shown, no charge ever attempted) until an admin flips it back off. Subscription lifecycle (activation, renewal implicitly via Stripe, cancellation, payment failure) is handled entirely by extending the existing Stripe webhook handler (`src/app/api/stripe/webhook/route.ts`) with `customer.subscription.updated`/`customer.subscription.deleted` handling — no manual admin action is ever required for the common lifecycle cases.
+
+Reuses existing env vars only: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SITE_URL`. No new env vars.
+
+## Out of scope (explicitly deferred, do not build)
+
+- **Certificates.** No course-completion tracking exists yet (Course/Lesson currently has no "completed" concept at all). Do not add any certificate logic, and do not touch Course/Lesson models.
+- **1-on-1 mentoring with signed agreements.** No mentor or booking data model exists. Do not add a Mentor model, booking flow, or e-signature/agreement logic.
+- Both are real future requests from the site owner — leave them out entirely rather than stub them, so nothing half-built creates confusion later.
 
 ## Files to change
 
-### `src/app/account/page.tsx`
-- Change: extend `AccountPage` to fetch the user's unlocked Materials, unlocked Courses, and class Signups (three parallel queries via `Promise.all`), dedupe/sort/split them in plain JS, and render three new sections between the existing account-info block and the existing "Change password" block. The account-info block, change-password block, and logout form are unchanged — do not modify `change-password-form.tsx` or `actions.ts`.
-- New queries, added after the existing `db.user.findUnique` call and its `if (!user) return null;` guard:
-  ```ts
-  const [materialPurchases, coursePurchases, signups] = await Promise.all([
-    db.purchase.findMany({
-      where: {
-        email: { equals: user.email, mode: "insensitive" },
-        status: "paid",
-        materialId: { not: null },
+### `prisma/schema.prisma`
+
+- Change: add four fields to the existing `User` model (do not create a new model — this mirrors the existing flat-field style already used for `sessionVersion`/`failedLoginAttempts`/`lockedUntil`).
+
+```prisma
+model User {
+  id                   String    @id @default(cuid())
+  email                String    @unique
+  username             String    @unique
+  passwordHash         String
+  sessionVersion       Int       @default(0)
+  failedLoginAttempts  Int       @default(0)
+  lockedUntil          DateTime?
+  resetToken           String?   @unique
+  resetTokenExpiresAt  DateTime?
+  isComped             Boolean   @default(false)
+  membershipStatus     String    @default("none")
+  stripeCustomerId     String?
+  stripeSubscriptionId String?   @unique
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+}
+```
+
+- `membershipStatus` is a plain string (matching `Purchase.status`'s existing plain-string convention rather than a Prisma enum), one of: `"none"`, `"active"`, `"past_due"`, `"canceled"`. Default `"none"` for every user who has never checked out.
+- `stripeCustomerId` / `stripeSubscriptionId` are nullable — only populated once a user actually completes a membership checkout. `stripeSubscriptionId` is `@unique` so webhook lookups by subscription ID are precise (0 or 1 row).
+- Generate the migration against a real reachable Postgres exactly as prior schema-changing tasks in this repo did (start the local Postgres if needed, run `npx prisma migrate dev --name add_user_membership_fields`), then confirm `npx prisma generate` succeeds.
+
+### `src/lib/site.ts`
+
+- Change: add one new disclaimer string, following the exact tone/voice of the existing three disclaimers (do not invent new phrasing style).
+
+```ts
+membershipDisclaimer:
+  "Membership is completely optional and never required — every free class, and any material marked Free, stays free whether or not you join. Membership is a way to support this project directly. It is not a credit repair service, does not guarantee any change to your credit score or report, and does not expedite anything else on this site. Cancel anytime.",
+```
+
+### `src/app/account/membership-actions.ts` (new file)
+
+`"use server"` file, following the exact conventions of `src/app/materials/actions.ts` (duplicate the local `getSiteOrigin()` helper here too — this repo's established convention is to duplicate this small helper per-file rather than share it, confirmed by its presence in both `materials/actions.ts`, `courses/actions.ts`, and `account/forgot-password/actions.ts`).
+
+```ts
+"use server";
+
+import { headers } from "next/headers";
+import { redirect } from "next/navigation";
+import { requireUser } from "@/lib/dal";
+import { db } from "@/lib/db";
+import { getStripe, isStripeConfigured } from "@/lib/stripe";
+
+async function getSiteOrigin() { /* identical body to materials/actions.ts's version */ }
+
+export type MembershipActionState = { error?: string } | undefined;
+
+export async function startMembershipCheckout(
+  _prevState: MembershipActionState,
+  _formData: FormData
+): Promise<MembershipActionState>
+
+export async function openBillingPortal(
+  _prevState: MembershipActionState,
+  _formData: FormData
+): Promise<MembershipActionState>
+```
+
+**`startMembershipCheckout` behavior:**
+1. `const { userId } = await requireUser();` then `const user = await db.user.findUnique({ where: { id: userId } }); if (!user) return { error: "Account not found." };`
+2. If `!isStripeConfigured()`, return `{ error: "Online payments aren't set up yet. Please contact us directly." }` (mirrors the existing degrade-gracefully message style in `materials/actions.ts`).
+3. Guard double-submit / already-a-member: if `user.isComped || user.membershipStatus === "active"`, return `{ error: "You're already a member — thank you!" }` without creating a new Checkout Session.
+4. `const origin = await getSiteOrigin(); const stripe = getStripe();`
+5. Create the Checkout Session:
+```ts
+const session = await stripe.checkout.sessions.create({
+  mode: "subscription",
+  payment_method_types: ["card"],
+  customer_email: user.email,
+  client_reference_id: user.id,
+  line_items: [
+    {
+      price_data: {
+        currency: "usd",
+        unit_amount: 999,
+        recurring: { interval: "month" },
+        product_data: { name: "CreditCareCourse.com Membership" },
       },
-      include: { material: true },
-      orderBy: { createdAt: "desc" },
-    }),
-    db.purchase.findMany({
-      where: {
-        email: { equals: user.email, mode: "insensitive" },
-        status: "paid",
-        courseId: { not: null },
-      },
-      include: { course: true },
-      orderBy: { createdAt: "desc" },
-    }),
-    db.signup.findMany({
-      where: { email: { equals: user.email, mode: "insensitive" } },
-      include: { classSession: true },
-      orderBy: { createdAt: "desc" },
-    }),
-  ]);
-  ```
-  Only `status: "paid"` rows are included for Materials/Courses — this is the sole "access granted" value in this codebase (confirmed via `/api/download/[token]/route.ts`'s own gate, `purchase.status !== "paid"`, and the Stripe webhook, which only ever sets `status: "paid"` on `checkout.session.completed` with `payment_status === "paid"`; free instant-unlocks also write `status: "paid"` directly). Rows with `status: "pending"` (checkout started, never completed) are deliberately excluded — a visitor who abandoned checkout should not see a phantom "purchase" they never completed.
-- Dedupe logic (plain JS, no extra query), added right after the `Promise.all`:
-  ```ts
-  const materials = dedupeByKey(materialPurchases.filter((p) => p.material !== null), (p) => p.materialId!);
-  const courses = dedupeByKey(coursePurchases.filter((p) => p.course !== null), (p) => p.courseId!);
-  ```
-  where `dedupeByKey` is a small local helper (defined in this file, not exported):
-  ```ts
-  function dedupeByKey<T>(items: T[], keyFn: (item: T) => string): T[] {
-    const seen = new Set<string>();
-    return items.filter((item) => {
-      const key = keyFn(item);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
+      quantity: 1,
+    },
+  ],
+  success_url: `${origin}/account?membership=success`,
+  cancel_url: `${origin}/account`,
+});
+```
+6. If `!session.url`, return `{ error: "Could not start checkout. Please try again." }`. Otherwise `redirect(session.url)`.
+7. Note: unlike `Purchase`, no DB row is pre-created here — `client_reference_id` carries the user identity through to the webhook, so there is nothing to correlate against beforehand and no "pending" state needed for membership.
+
+**`openBillingPortal` behavior:**
+1. `const { userId } = await requireUser();` then load the user.
+2. If `!user.stripeCustomerId`, return `{ error: "No billing account found yet." }`.
+3. `const origin = await getSiteOrigin(); const stripe = getStripe();`
+4. `const portalSession = await stripe.billingPortal.sessions.create({ customer: user.stripeCustomerId, return_url: \`${origin}/account\` });`
+5. If `!portalSession.url`, return `{ error: "Could not open the billing portal. Please try again." }`. Otherwise `redirect(portalSession.url)`.
+
+### `src/app/api/stripe/webhook/route.ts`
+
+- Change: extend the existing handler with new branches alongside the existing `checkout.session.completed` branch. Keep the existing one-time-purchase behavior byte-for-byte unchanged; branch on `session.mode` within `checkout.session.completed`, and add two new top-level `if (event.type === ...)` blocks for subscription lifecycle events.
+
+```ts
+if (event.type === "checkout.session.completed") {
+  const session = event.data.object as Stripe.Checkout.Session;
+
+  if (session.mode === "subscription") {
+    const userId = session.client_reference_id;
+    const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
+    const subscriptionId =
+      typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
+
+    if (userId && customerId && subscriptionId) {
+      await db.user.updateMany({
+        where: { id: userId },
+        data: {
+          stripeCustomerId: customerId,
+          stripeSubscriptionId: subscriptionId,
+          membershipStatus: "active",
+        },
+      });
+    }
+  } else if (session.payment_status === "paid") {
+    // existing one-time Purchase handling, unchanged
+    await db.purchase.updateMany({
+      where: { stripeSessionId: session.id },
+      data: { status: "paid" },
     });
   }
-  ```
-  Since both source arrays are already ordered `createdAt: "desc"`, the first occurrence of a given `materialId`/`courseId` kept by this filter is always the most recently created `Purchase` row for that item — this is the intended "if unlocked twice, show the most recent one" behavior. The `.filter((p) => p.material !== null)` (and the `course` equivalent) step is what handles a `Purchase` whose linked `Material`/`Course` was since deleted: deleting a `Material`/`Course` sets `Purchase.materialId`/`courseId` to `null` (confirmed existing `onDelete: SetNull` behavior on this schema — see `.pipeline/review.md` from the Course feature task), so `materialId: { not: null }` in the query already excludes those, and this `.material !== null` check is a second, defensive layer against the same case. **Do not render a "no longer available" placeholder row — skip it entirely.** A `Material`/`Course` that's merely `published: false` (not deleted) still has a non-null relation and is NOT filtered out here, matching the existing `/api/download/[token]` route's own behavior of not checking `published` at all — a visitor who already has legitimate access keeps it regardless of the item's current public-listing status.
-- Class signups split logic, added after the dedupe block:
-  ```ts
-  const now = new Date();
-  const upcomingSignups = signups
-    .filter((s) => s.classSession.startsAt >= now)
-    .sort((a, b) => a.classSession.startsAt.getTime() - b.classSession.startsAt.getTime());
-  const pastSignups = signups
-    .filter((s) => s.classSession.startsAt < now)
-    .sort((a, b) => b.classSession.startsAt.getTime() - a.classSession.startsAt.getTime());
-  ```
-  Upcoming: soonest first. Past: most-recently-happened first. Every `Signup` row's `classSession` is guaranteed non-null (the schema's `ClassSession → Signup` relation is `onDelete: Cascade`, so a `Signup` can never outlive its `ClassSession`) — no null-check needed here, unlike Materials/Courses.
-- Rendering, inserted between the existing account-info `<div>` and the existing `<div className="mt-8"><h2>Change password</h2>...` block:
-  ```tsx
-  <div className="mt-8">
-    <h2 className="text-lg font-semibold text-slate-900">My materials</h2>
-    {materials.length === 0 ? (
-      <p className="mt-2 text-sm text-slate-500">
-        You haven&apos;t unlocked any materials yet.{" "}
-        <Link href="/materials" className="text-blue-600 hover:underline">Browse the library</Link>.
-      </p>
-    ) : (
-      <div className="mt-3 space-y-2">
-        {materials.map((p) => (
-          <div key={p.id} className="flex items-center justify-between rounded-lg border border-slate-200 p-4">
-            <p className="font-medium text-slate-900">{p.material!.title}</p>
-            <a href={`/api/download/${p.downloadToken}`} className="text-sm font-medium text-blue-600 hover:underline">
-              Download
-            </a>
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
+}
 
-  <div className="mt-8">
-    <h2 className="text-lg font-semibold text-slate-900">My courses</h2>
-    {courses.length === 0 ? (
-      <p className="mt-2 text-sm text-slate-500">
-        You haven&apos;t unlocked any courses yet.{" "}
-        <Link href="/courses" className="text-blue-600 hover:underline">Browse courses</Link>.
-      </p>
-    ) : (
-      <div className="mt-3 space-y-2">
-        {courses.map((p) => (
-          <div key={p.id} className="flex items-center justify-between rounded-lg border border-slate-200 p-4">
-            <p className="font-medium text-slate-900">{p.course!.title}</p>
-            <Link href={`/courses/${p.courseId}?token=${p.downloadToken}`} className="text-sm font-medium text-blue-600 hover:underline">
-              View course
-            </Link>
-          </div>
-        ))}
-      </div>
-    )}
-  </div>
+if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
+  const subscription = event.data.object as Stripe.Subscription;
+  const status =
+    event.type === "customer.subscription.deleted"
+      ? "canceled"
+      : subscription.status === "active"
+        ? "active"
+        : subscription.status === "canceled"
+          ? "canceled"
+          : "past_due"; // covers past_due, unpaid, incomplete, incomplete_expired, trialing (unused), paused
 
-  <div className="mt-8">
-    <h2 className="text-lg font-semibold text-slate-900">My class signups</h2>
-    {upcomingSignups.length === 0 && pastSignups.length === 0 ? (
-      <p className="mt-2 text-sm text-slate-500">
-        You haven&apos;t signed up for any classes yet.{" "}
-        <Link href="/calendar" className="text-blue-600 hover:underline">See the calendar</Link>.
-      </p>
-    ) : (
-      <>
-        {upcomingSignups.length > 0 && (
-          <div className="mt-3">
-            <p className="text-sm font-medium text-slate-500">Upcoming</p>
-            <div className="mt-2 space-y-2">
-              {upcomingSignups.map((s) => (
-                <div key={s.id} className="rounded-lg border border-slate-200 p-4">
-                  <p className="font-medium text-slate-900">{s.classSession.title}</p>
-                  <p className="text-sm text-slate-500">{formatClassDate(s.classSession.startsAt)}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-        {pastSignups.length > 0 && (
-          <div className="mt-4">
-            <p className="text-sm font-medium text-slate-500">Past</p>
-            <div className="mt-2 space-y-2">
-              {pastSignups.map((s) => (
-                <div key={s.id} className="rounded-lg border border-slate-200 p-4 opacity-70">
-                  <p className="font-medium text-slate-900">{s.classSession.title}</p>
-                  <p className="text-sm text-slate-500">{formatClassDate(s.classSession.startsAt)}</p>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-      </>
-    )}
-  </div>
-  ```
-  Add `import Link from "next/link";` and `import { formatClassDate } from "@/lib/format";` to the top of the file (both already exist as shared utilities — `formatClassDate` is defined in `src/lib/format.ts` and used identically in `src/app/page.tsx`/`src/app/admin/classes/page.tsx`). The Materials "Download" link uses a plain `<a>` tag (not `next/link`) because it points at `/api/download/[token]`, a non-navigational API route that returns a file/redirect — mirrors the exact same choice already made in `src/app/materials/success/page.tsx`. The Courses "View course" link uses `next/link`'s `Link` because `/courses/[id]` is a real page — mirrors `src/app/materials/success/page.tsx`'s course-equivalent pattern isn't present, but matches how `startCourseCheckout`'s own `redirect()` target and every other in-app link to a real page in this codebase uses `Link`/`redirect`, never a plain `<a>`.
+  await db.user.updateMany({
+    where: { stripeSubscriptionId: subscription.id },
+    data: { membershipStatus: status },
+  });
+}
+```
+
+- Use `updateMany` (not `update`) for every membership-related write in this file specifically so a not-found `id`/`stripeSubscriptionId` (unknown user, stale test webhook, race condition) matches zero rows instead of throwing — this is the concrete answer to the "webhook arrives for a user who no longer exists" edge case. Always `return NextResponse.json({ received: true })` at the end regardless, exactly as today.
+- No dedicated idempotency table is needed for the new branches: every write here is an idempotent *set* (not a create or increment), so Stripe redelivering the same event twice just sets the same values twice — a no-op difference. This differs from `Purchase`, which needs `stripeSessionId @unique` because it *creates* rows; membership never creates a row, only updates an existing `User`.
+
+### `src/app/account/page.tsx`
+
+- Change: insert a new "Membership" section directly after the existing username/email info block (before "My materials"), using the same `rounded-lg border border-slate-200 p-5`-style card as the info block above it.
+- Logic (evaluate in this priority order):
+  1. `user.isComped` → render: *"You have complimentary membership access — thank you for being part of {site.name}."* No button.
+  2. else `user.membershipStatus === "active"` → render: *"You're a member ($9.99/month)."* plus `<ManageMembershipForm />`.
+  3. else (`"none" | "past_due" | "canceled"`) → render `<DisclaimerBanner>{site.membershipDisclaimer}</DisclaimerBanner>` plus copy *"Optional membership — $9.99 to join today, $9.99/month after."* plus `<BecomeMemberForm />`. If status is `"past_due"` or `"canceled"` specifically, prepend a short line noting that ("Your last membership payment didn't go through." / "Your membership was canceled.") before the same become-a-member CTA — clicking it starts a fresh Checkout Session; the webhook naturally overwrites `stripeSubscriptionId`/`membershipStatus` with the new subscription.
+- Import `site` from `@/lib/site` and `DisclaimerBanner` from `@/components/disclaimer-banner` (both already exist).
+
+### `src/app/account/become-member-form.tsx` (new file)
+
+`"use client"` component, following the exact `useActionState` pattern of `src/app/account/change-password-form.tsx` (read that file for the precise structure/error-rendering convention before writing this). Wraps a `<form action={...}>` calling `startMembershipCheckout`, single submit button labeled "Become a member — $9.99/mo", renders `state.error` in the same red-text style used elsewhere (`text-sm text-red-600`).
+
+### `src/app/account/manage-membership-form.tsx` (new file)
+
+Same pattern, wraps `openBillingPortal`, single submit button labeled "Manage membership".
+
+### `src/app/admin/users/page.tsx` (new file)
+
+Follows `src/app/admin/materials/page.tsx`'s exact table structure/styling.
+
+```tsx
+import { requireAdmin } from "@/lib/dal";
+import { db } from "@/lib/db";
+import { toggleComp } from "./actions";
+
+export default async function AdminUsersPage() {
+  await requireAdmin();
+  const users = await db.user.findMany({ orderBy: { createdAt: "desc" } });
+  // table columns: Username, Email, Membership (badge), Joined, [Comp/Un-comp button]
+}
+```
+
+- Membership badge logic per row: `u.isComped` → "Comped" (green badge, same `bg-green-100 text-green-700` style as the `Published` badge in `admin/materials/page.tsx`); else `u.membershipStatus === "active"` → "Active" (green); else `"past_due"` → "Past due" (amber, `bg-amber-100 text-amber-700`); else `"canceled"` → "Canceled" (slate, `bg-slate-100 text-slate-500`); else `"none"` → "—" (slate, muted, no badge pill needed, just the em-dash in `text-slate-400`).
+- Action column: a `<form action={toggleComp.bind(null, u.id)}>` with a single submit button reading "Un-comp" if `u.isComped` else "Comp" — same `.bind(null, id)` pattern as `deleteMaterial` in `admin/materials/page.tsx`.
+- Empty state: `No users yet.` row, matching the `No materials yet.` convention.
+
+### `src/app/admin/users/actions.ts` (new file)
+
+```ts
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { requireAdmin } from "@/lib/dal";
+import { db } from "@/lib/db";
+
+export async function toggleComp(userId: string) {
+  await requireAdmin();
+  const user = await db.user.findUnique({ where: { id: userId } });
+  if (!user) return;
+  await db.user.update({ where: { id: userId }, data: { isComped: !user.isComped } });
+  revalidatePath("/admin/users");
+}
+```
+
+- No form state / validation needed — this is a no-arg toggle, matching `deleteMaterial`'s existing no-`useActionState` convention exactly.
+
+### `src/app/admin/layout.tsx`
+
+- Change: add one entry to the `links` array: `{ href: "/admin/users", label: "Users" }` (place it after `"Classes"`/`"Courses"`, before `"Export"` — match existing array order style).
 
 ## Edge cases
-- **User has zero purchases and zero signups**: each of the three sections independently shows its own empty state with a link to browse — never blank space, never a shared/combined empty state.
-- **A Material/Course purchase exists but the item was since deleted**: `Purchase.materialId`/`courseId` is already `null` (existing `onDelete: SetNull` behavior), excluded by the query's own `{ not: null }` filter and the dedupe step's null-check. Not rendered at all — no placeholder row.
-- **A Material/Course purchase exists and the item is merely unpublished (not deleted)**: still shown and still linked — access already granted, matching the existing `/api/download/[token]` route's behavior of not checking `published`.
-- **Duplicate purchases of the same Material/Course** (e.g., a visitor unlocked the same free material twice, producing two `Purchase` rows): only the most recently created one is shown, via the dedupe-by-key step. The older row's `downloadToken` still works if someone has it bookmarked (nothing about this dashboard invalidates it) — this dashboard just doesn't display a redundant second row for it.
-- **A class signup for a class that already happened**: shown in the "Past" section, visually de-emphasized (`opacity-70`), sorted most-recent-past-first. Not hidden — a visitor may want to see their own attendance history.
-- **Email case mismatch between an anonymous purchase/signup and the account's normalized-lowercase email** (e.g., visitor typed `Jane@Example.com` at checkout, then later signed up for an account with `jane@example.com`): handled by `mode: "insensitive"` on every one of the three queries — confirmed necessary, not a hypothetical, since `Purchase`/`Signup`'s own `EmailSchema` never lowercases and `User.email` always does.
-- **A Stripe checkout that's still `"pending"` (started, never completed, or webhook not yet received)**: never shown. Only `status: "paid"` rows are queried in the first place — no separate filtering-out step needed, it's built into the `where` clause.
-- **A user with no `email` change mechanism in this app** (there is none — `User.email` is fixed at signup) — not an edge case requiring handling, just confirms the join key is stable for a given account's lifetime; noted for completeness, no code implication.
 
-## Dependencies / config changes
-None. No new npm packages, no schema changes, no new environment variables. Purely additive read queries against existing tables, using an existing Postgres feature (`mode: "insensitive"` string filtering) already supported by this datasource.
+- **User is both comped and has completed a real Stripe checkout (either order):** No reconciliation needed — `isComped` and `membershipStatus` are independent fields checked in strict priority order (`isComped` first) purely at render/CTA time in `/account`. Real Stripe webhooks keep updating `membershipStatus` in the background regardless of `isComped`'s value; if an admin later un-comps the user, whatever `membershipStatus` Stripe most recently reported becomes visible again automatically, with no extra sync logic required.
+- **Webhook arrives for a user id / subscription id that doesn't exist (deleted user, stale test event, race condition):** All membership webhook writes use `updateMany`, which matches zero rows silently instead of throwing. The handler always returns `{ received: true }` with 200 regardless, exactly as the existing purchase-completion branch does.
+- **Subscription lapses (`past_due`/`canceled`):** Per the business requirement, this must never affect access to free classes or free materials anywhere else in the app — no other file in this spec should read `membershipStatus` for any access-control decision. Only `/account`'s own display and CTA copy change.
+- **Double-submission of "Become a member":** Guarded at the top of `startMembershipCheckout` by checking `user.isComped || user.membershipStatus === "active"` before creating a Checkout Session, returning a friendly "already a member" error instead of a second subscription.
+- **Duplicate webhook delivery for the same event (Stripe retries):** Safe by construction — every membership write is an idempotent `set`, not a create or increment, so replaying the same event twice produces the same end state. `stripeSubscriptionId @unique` exists for query precision (0-or-1-row lookups), not as a dedup mechanism.
+- **Admin un-comps a user who never paid (no Stripe subscription ever created):** `membershipStatus` is untouched by the un-comp action and remains whatever it already was — `"none"` by default for a user webhooks never touched — so `/account` correctly falls back to showing the "become a member" CTA. No special-casing needed.
+- **Env vars:** No new ones. Reuses `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SITE_URL`, all already documented in `.env.example`. Flag this to the site owner as a deployment note (not a code change): in the Stripe Dashboard, the existing webhook endpoint must also be subscribed to the `customer.subscription.updated` and `customer.subscription.deleted` event types (in addition to whatever it already sends `checkout.session.completed` for) — if the endpoint is already configured to send all event types, no dashboard change is needed at all.
+- **Wording/legal:** All new user-facing copy must go through `site.membershipDisclaimer` and match the existing soft, non-outcome-linked tone. Do not use words like "unlock," "premium," or anything implying membership affects credit-repair results or speed.
 
 ## Open questions
-None. The one thing that looked like it might need a decision — whether email normalization required a data migration — was resolved by reading the actual write-path code: `Purchase`/`Signup` emails are genuinely never lowercased today, so a case-insensitive read is required and sufficient; no migration is being made or needed.
+
+None — all structural decisions were confirmed directly with the site owner (billing shape, comp-toggle behavior, free-core-stays-free requirement) before this spec was written.
