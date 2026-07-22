@@ -1,43 +1,9 @@
-const FLOATING_BADGES = [
-  { label: "750", sublabel: "Equifax", className: "left-[0%] top-[4%]", delay: "0s" },
-  { label: "800", sublabel: "Experian", className: "right-[2%] top-[0%]", delay: "1.2s" },
-  { label: "760", sublabel: "TransUnion", className: "right-[-4%] top-[40%]", delay: "2.4s" },
-  { label: "Mortgage Ready", sublabel: null, className: "left-[-6%] top-[46%]", delay: "0.8s" },
-  { label: "Explore Lower Rates", sublabel: null, className: "left-[0%] bottom-[14%]", delay: "2s" },
-  {
-    label: "Down Payment Assistance",
-    sublabel: null,
-    className: "right-[-4%] bottom-[-2%]",
-    delay: "1.6s",
-  },
-];
-
 export default function HomeownershipHeroGraphic() {
   return (
-    <div className="relative mx-auto w-full max-w-md py-6">
-      {/* Floating badges sit behind the illustration, muted and low-contrast so
-          they read as background texture rather than competing with the
-          foreground scene or the page's actual copy/CTAs. */}
-      {FLOATING_BADGES.map((badge) => (
-        <div
-          key={badge.label}
-          className={`animate-gentle-float absolute z-0 rounded-full bg-slate-100/70 px-3 py-1 text-xs font-medium text-slate-400 ${badge.className}`}
-          style={{ animationDelay: badge.delay }}
-        >
-          {badge.sublabel ? (
-            <>
-              <span className="font-semibold text-slate-400">{badge.label}</span>{" "}
-              <span className="text-slate-400/80">{badge.sublabel}</span>
-            </>
-          ) : (
-            badge.label
-          )}
-        </div>
-      ))}
-
+    <div className="relative z-10 mx-auto w-full max-w-md py-6">
       <svg
         viewBox="0 0 400 300"
-        className="relative z-10 w-full drop-shadow-sm"
+        className="w-full drop-shadow-sm"
         role="img"
         aria-label="Illustration of a family standing in front of a house with a Just Purchased yard sign"
       >
