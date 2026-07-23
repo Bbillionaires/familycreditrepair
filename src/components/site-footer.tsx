@@ -30,8 +30,8 @@ export default function SiteFooter() {
           <p className="text-xs text-slate-400">{site.generalDisclaimer}</p>
           <p className="mt-2 text-xs text-slate-400">
             &copy; {new Date().getFullYear()} {site.name}. All rights reserved.{" "}
-            <Link href="/legal/credit-education-agreement" className="hover:text-slate-600 hover:underline">
-              Credit Education Services Agreement
+            <Link href="/legal" className="hover:text-slate-600 hover:underline">
+              Legal
             </Link>
           </p>
         </div>
