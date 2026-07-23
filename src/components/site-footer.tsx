@@ -18,6 +18,7 @@ export default function SiteFooter() {
               <li><Link href="/calendar" className="hover:text-slate-900">Classes &amp; Calendar</Link></li>
               <li><Link href="/free-credit-reports" className="hover:text-slate-900">Free Credit Reports</Link></li>
               <li><Link href="/courses" className="hover:text-slate-900">Courses</Link></li>
+              <li><Link href="/mentoring" className="hover:text-slate-900">1-on-1 Mentoring</Link></li>
             </ul>
           </div>
           <div>
@@ -28,7 +29,10 @@ export default function SiteFooter() {
         <div className="mt-8 border-t border-slate-200 pt-6">
           <p className="text-xs text-slate-400">{site.generalDisclaimer}</p>
           <p className="mt-2 text-xs text-slate-400">
-            &copy; {new Date().getFullYear()} {site.name}. All rights reserved.
+            &copy; {new Date().getFullYear()} {site.name}. All rights reserved.{" "}
+            <Link href="/legal/credit-education-agreement" className="hover:text-slate-600 hover:underline">
+              Credit Education Services Agreement
+            </Link>
           </p>
         </div>
       </div>

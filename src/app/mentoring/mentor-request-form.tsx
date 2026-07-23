@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useActionState } from "react";
 import { createMentorRequest } from "./actions";
 import { formatMoney } from "@/lib/format";
@@ -89,15 +90,20 @@ export default function MentorRequestForm({ mentors }: { mentors: MentorOption[]
           className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
         />
       </div>
-      {/* PLACEHOLDER — this is not final legal agreement text. Replace with
-          lawyer-reviewed consent/agreement copy before this form is used with
-          real members, especially given CROA considerations for 1-on-1 credit
-          consulting. Do not treat this wording as legally sufficient. */}
       <label className="flex items-start gap-2 text-sm text-slate-600">
         <input type="checkbox" name="agreedToTerms" required className="mt-1" />
-        I understand this request does not guarantee a session, that a mentor or
-        admin must approve it first, and I agree to the terms of participating in
-        a 1-on-1 session (placeholder — final agreement pending legal review).
+        <span>
+          I understand this request does not guarantee a session, that a mentor
+          or admin must approve it first, and I have read and agree to the{" "}
+          <Link
+            href="/legal/credit-education-agreement"
+            target="_blank"
+            className="text-blue-600 hover:underline"
+          >
+            Credit Education Services Agreement
+          </Link>
+          .
+        </span>
       </label>
       {state?.error && <p className="text-sm text-red-600">{state.error}</p>}
       <button
