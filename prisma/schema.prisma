@@ -78,16 +78,17 @@ model Course {
 }
 
 model Lesson {
-  id        String   @id @default(cuid())
-  course    Course   @relation(fields: [courseId], references: [id], onDelete: Cascade)
-  courseId  String
-  title     String
-  order     Int      @default(0)
-  content   String?
-  videoUrl  String?
-  fileUrl   String?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id          String             @id @default(cuid())
+  course      Course             @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  courseId    String
+  title       String
+  order       Int                @default(0)
+  content     String?
+  videoUrl    String?
+  fileUrl     String?
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
+  completions LessonCompletion[]
 
   @@index([courseId])
 }
@@ -112,6 +113,7 @@ model User {
 
   chatUsages        ChatUsage[]
   chatPackPurchases ChatPackPurchase[]
+  lessonCompletions LessonCompletion[]
 }
 
 model Purchase {
@@ -190,4 +192,16 @@ model ChatSettings {
   packPriceCents     Int      @default(200)
   hardDailyCap       Int      @default(20)
   updatedAt          DateTime @updatedAt
+}
+
+model LessonCompletion {
+  id          String   @id @default(cuid())
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  lesson      Lesson   @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+  lessonId    String
+  completedAt DateTime @default(now())
+
+  @@unique([userId, lessonId])
+  @@index([lessonId])
 }

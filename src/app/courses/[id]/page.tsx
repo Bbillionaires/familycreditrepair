@@ -1,8 +1,11 @@
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { db } from "@/lib/db";
 import { formatMoney } from "@/lib/format";
+import { verifyUserSession } from "@/lib/user-session";
 import VideoEmbed from "@/components/video-embed";
 import CourseUnlockForm from "./course-unlock-form";
+import LessonCompleteCheckbox from "./lesson-complete-checkbox";
 
 export const dynamic = "force-dynamic";
 
@@ -26,6 +29,32 @@ export default async function CoursePage({
   if (token) {
     const purchase = await db.purchase.findUnique({ where: { downloadToken: token } });
     hasAccess = !!purchase && purchase.courseId === course.id && purchase.status === "paid";
+  }
+
+  let loggedIn = false;
+  let canTrackProgress = false;
+  let completedLessonIds = new Set<string>();
+
+  const session = await verifyUserSession();
+  if (session) {
+    const user = await db.user.findUnique({ where: { id: session.userId } });
+    if (user && user.sessionVersion === session.sessionVersion) {
+      loggedIn = true;
+      const ownsCourse = await db.purchase.findFirst({
+        where: {
+          courseId: course.id,
+          status: "paid",
+          email: { equals: user.email, mode: "insensitive" },
+        },
+      });
+      if (ownsCourse) {
+        canTrackProgress = true;
+        const completions = await db.lessonCompletion.findMany({
+          where: { userId: user.id, lessonId: { in: course.lessons.map((l) => l.id) } },
+        });
+        completedLessonIds = new Set(completions.map((c) => c.lessonId));
+      }
+    }
   }
 
   return (
@@ -58,9 +87,31 @@ export default async function CoursePage({
         </>
       ) : (
         <div className="mt-8 space-y-8">
+          {course.lessons.length > 0 && !canTrackProgress && (
+            <p className="text-sm text-slate-500">
+              {!loggedIn ? (
+                <>
+                  <Link href="/login" className="text-blue-600 hover:underline">
+                    Log in
+                  </Link>{" "}
+                  to track your progress toward a future certificate.
+                </>
+              ) : (
+                "These lessons aren't linked to your account yet, so progress can't be tracked here."
+              )}
+            </p>
+          )}
           {course.lessons.map((lesson) => (
             <div key={lesson.id} className="rounded-lg border border-slate-200 p-5">
               <h2 className="text-lg font-semibold text-slate-900">{lesson.title}</h2>
+              {canTrackProgress && (
+                <div className="mt-2">
+                  <LessonCompleteCheckbox
+                    lessonId={lesson.id}
+                    initiallyComplete={completedLessonIds.has(lesson.id)}
+                  />
+                </div>
+              )}
               {lesson.content && (
                 <div className="mt-3 space-y-3 text-sm text-slate-600">
                   {lesson.content.split("\n\n").map((paragraph, i) => (
