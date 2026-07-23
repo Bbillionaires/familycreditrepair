@@ -3,6 +3,7 @@
 import { revalidatePath } from "next/cache";
 import { verifyUserSession } from "@/lib/user-session";
 import { db } from "@/lib/db";
+import { maybeIssueCertificate } from "@/lib/certificate";
 
 export type SetLessonCompletionResult = { error: string } | { ok: true };
 
@@ -38,6 +39,7 @@ export async function setLessonCompletion(
       update: {},
       create: { userId: user.id, lessonId },
     });
+    await maybeIssueCertificate(user.id);
   } else {
     await db.lessonCompletion.deleteMany({ where: { userId: user.id, lessonId } });
   }

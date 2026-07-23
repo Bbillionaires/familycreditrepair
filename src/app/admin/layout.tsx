@@ -12,6 +12,8 @@ const links = [
   { href: "/admin/mentors", label: "Mentors" },
   { href: "/admin/mentoring", label: "Mentoring requests" },
   { href: "/admin/chat-settings", label: "Chat Settings" },
+  { href: "/admin/quiz-questions", label: "Quiz Questions" },
+  { href: "/admin/quiz-settings", label: "Quiz Settings" },
   { href: "/admin/export", label: "Export" },
 ];
 

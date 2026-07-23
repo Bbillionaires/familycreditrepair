@@ -16,7 +16,7 @@ export default async function SiteHeader() {
   const session = await verifyUserSession();
 
   return (
-    <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
+    <header className="no-print sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="mx-auto max-w-6xl px-4 py-3 sm:px-6">
         <div className="flex items-center justify-between">
           <Link href="/" className="flex items-baseline gap-2">

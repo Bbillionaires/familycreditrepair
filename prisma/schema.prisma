@@ -114,6 +114,8 @@ model User {
   chatUsages        ChatUsage[]
   chatPackPurchases ChatPackPurchase[]
   lessonCompletions LessonCompletion[]
+  quizAttempts      QuizAttempt[]
+  certificate       Certificate?
 }
 
 model Purchase {
@@ -204,4 +206,63 @@ model LessonCompletion {
 
   @@unique([userId, lessonId])
   @@index([lessonId])
+}
+
+model QuizSettings {
+  id                        String   @id @default("singleton")
+  questionsPerAttempt       Int      @default(50)
+  passThresholdPercent      Int      @default(80)
+  maxAttemptsPerRollingDays Int      @default(4)
+  rollingWindowDays         Int      @default(30)
+  updatedAt                 DateTime @updatedAt
+}
+
+model QuizQuestion {
+  id            String              @id @default(cuid())
+  question      String
+  optionA       String
+  optionB       String
+  optionC       String
+  optionD       String
+  correctOption String
+  explanation   String?
+  category      String?
+  published     Boolean             @default(false)
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+  answers       QuizAttemptAnswer[]
+}
+
+model QuizAttempt {
+  id          String              @id @default(cuid())
+  user        User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId      String
+  startedAt   DateTime            @default(now())
+  submittedAt DateTime?
+  score       Int?
+  passed      Boolean             @default(false)
+  createdAt   DateTime            @default(now())
+  answers     QuizAttemptAnswer[]
+
+  @@index([userId, createdAt])
+}
+
+model QuizAttemptAnswer {
+  id             String        @id @default(cuid())
+  attempt        QuizAttempt   @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  attemptId      String
+  question       QuizQuestion? @relation(fields: [questionId], references: [id], onDelete: SetNull)
+  questionId     String?
+  selectedOption String?
+  correct        Boolean       @default(false)
+
+  @@index([attemptId])
+  @@index([questionId])
+}
+
+model Certificate {
+  id       String   @id @default(cuid())
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId   String   @unique
+  issuedAt DateTime @default(now())
 }

@@ -26,7 +26,7 @@ export default async function AccountPage() {
   const user = await db.user.findUnique({ where: { id: userId } });
   if (!user) return null;
 
-  const [materialPurchases, coursePurchases, signups] = await Promise.all([
+  const [materialPurchases, coursePurchases, signups, certificate] = await Promise.all([
     db.purchase.findMany({
       where: {
         email: { equals: user.email, mode: "insensitive" },
@@ -50,6 +50,7 @@ export default async function AccountPage() {
       include: { classSession: true },
       orderBy: { createdAt: "desc" },
     }),
+    db.certificate.findUnique({ where: { userId } }),
   ]);
 
   const materials = dedupeByKey(
@@ -223,6 +224,27 @@ export default async function AccountPage() {
               </div>
             )}
           </>
+        )}
+      </div>
+
+      <div className="mt-8">
+        <h2 className="text-lg font-semibold text-slate-900">Certificate</h2>
+        {certificate ? (
+          <p className="mt-2 text-sm text-slate-600">
+            You&apos;ve earned your certificate.{" "}
+            <Link href="/account/certificate" className="text-blue-600 hover:underline">
+              View it
+            </Link>
+            .
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-slate-500">
+            Complete every course checklist and pass the{" "}
+            <Link href="/account/quiz" className="text-blue-600 hover:underline">
+              certification quiz
+            </Link>{" "}
+            to earn your certificate.
+          </p>
         )}
       </div>
 
