@@ -32,6 +32,10 @@ export default function SiteFooter() {
             &copy; {new Date().getFullYear()} {site.name}. All rights reserved.{" "}
             <Link href="/legal" className="hover:text-slate-600 hover:underline">
               Legal
+            </Link>{" "}
+            &middot;{" "}
+            <Link href="/admin/login" className="hover:text-slate-600 hover:underline">
+              Admin
             </Link>
           </p>
         </div>
