@@ -1,217 +1,103 @@
-# Spec: Optional $9.99/month membership (Stripe subscription)
+# Spec: 1-on-1 mentoring request (request-then-approve, no booking/payment)
 
 ## Summary
 
-Add an optional, non-gating recurring "membership" ($9.99 charged today, $9.99 every month after) that logged-in users can start from `/account`. It is purely a voluntary support/commitment mechanism — no existing free content (classes, free materials) is ever gated by membership status, and no new gating logic should be added anywhere outside the `/account` membership section itself. Wording must follow the site's existing CROA-conscious disclaimer tone (see `src/lib/site.ts`, `src/components/disclaimer-banner.tsx`): membership is framed as voluntary support, never as something required for, or that expedites, any credit-repair outcome.
+Add a "Request a 1-on-1 session" feature: a public form where a visitor picks an active mentor from a dropdown, describes what they need and their preferred time(s), checks a (placeholder) consent box, and submits. Nothing is auto-booked — every request sits as `"pending"` until an admin explicitly Approves or Declines it from a new admin list page. Mentors are a new admin-managed entity (name, a company-controlled email the site owner provisions separately, an informational session rate, an active flag, and a per-mentor "also notify this mentor by email" toggle). On submit, the admin is always emailed; the mentor is additionally emailed if that mentor's `notifyMentorOnRequest` flag is on. On approve/decline, the requester is emailed the outcome. All email sends reuse the existing `src/lib/email.ts` Resend integration and its established degrade-gracefully-if-not-configured behavior — never a hard requirement, never a crash if `RESEND_API_KEY` is unset. No calendar/slot-booking UI, no email relay/masking, no payment collection — all explicitly out of scope, confirmed with the site owner.
 
-Billing shape (confirmed): a standard Stripe subscription, `mode: "subscription"`, inline `price_data` with `recurring: { interval: "month" }`, `unit_amount: 999` — no separate one-time fee, the "first charge" is simply the subscription's first billing cycle. This mirrors the existing inline-`price_data` Checkout pattern already used for one-time Material/Course purchases (`src/app/materials/actions.ts`, `src/app/courses/actions.ts`) — no pre-created Stripe Price object needed, so no manual Stripe Dashboard setup for the price itself.
+## Out of scope — do not build
 
-Admins can toggle any user to `isComped = true` from a new `/admin/users` page — this waives billing indefinitely (no membership CTA shown, no charge ever attempted) until an admin flips it back off. Subscription lifecycle (activation, renewal implicitly via Stripe, cancellation, payment failure) is handled entirely by extending the existing Stripe webhook handler (`src/app/api/stripe/webhook/route.ts`) with `customer.subscription.updated`/`customer.subscription.deleted` handling — no manual admin action is ever required for the common lifecycle cases.
-
-Reuses existing env vars only: `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SITE_URL`. No new env vars.
-
-## Out of scope (explicitly deferred, do not build)
-
-- **Certificates.** No course-completion tracking exists yet (Course/Lesson currently has no "completed" concept at all). Do not add any certificate logic, and do not touch Course/Lesson models.
-- **1-on-1 mentoring with signed agreements.** No mentor or booking data model exists. Do not add a Mentor model, booking flow, or e-signature/agreement logic.
-- Both are real future requests from the site owner — leave them out entirely rather than stub them, so nothing half-built creates confusion later.
+- Real-time calendar/slot-booking UI.
+- Email relay/masking/inbound-parsing system (mentors use company-controlled mailboxes, provisioned outside this codebase).
+- Payment collection tied to mentoring sessions (rate is informational only).
+- AI chat, quiz, or certificate work — separate, later tasks.
+- Real legally-binding agreement text — see the placeholder note in the `MentorRequestForm` section below.
 
 ## Files to change
 
 ### `prisma/schema.prisma`
 
-- Change: add four fields to the existing `User` model (do not create a new model — this mirrors the existing flat-field style already used for `sessionVersion`/`failedLoginAttempts`/`lockedUntil`).
+Two new models, following this repo's established conventions (`cuid()` ids, `createdAt`/`updatedAt`, plain-string `status` fields like `Purchase.status`/`User.membershipStatus` rather than a Prisma enum):
 
 ```prisma
-model User {
-  id                   String    @id @default(cuid())
-  email                String    @unique
-  username             String    @unique
-  passwordHash         String
-  sessionVersion       Int       @default(0)
-  failedLoginAttempts  Int       @default(0)
-  lockedUntil          DateTime?
-  resetToken           String?   @unique
-  resetTokenExpiresAt  DateTime?
-  isComped             Boolean   @default(false)
-  membershipStatus     String    @default("none")
-  stripeCustomerId     String?
-  stripeSubscriptionId String?   @unique
-  createdAt            DateTime  @default(now())
-  updatedAt            DateTime  @updatedAt
+model Mentor {
+  id                  String          @id @default(cuid())
+  name                String
+  email               String
+  bio                 String?
+  sessionRateCents     Int?
+  notifyMentorOnRequest Boolean       @default(false)
+  active              Boolean         @default(true)
+  createdAt           DateTime        @default(now())
+  updatedAt           DateTime        @updatedAt
+  requests            MentorRequest[]
+}
+
+model MentorRequest {
+  id             String   @id @default(cuid())
+  mentor         Mentor?  @relation(fields: [mentorId], references: [id], onDelete: SetNull)
+  mentorId       String?
+  name           String
+  email          String
+  preferredTimes String
+  message        String?
+  agreedToTerms  Boolean
+  status         String   @default("pending")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([mentorId])
 }
 ```
 
-- `membershipStatus` is a plain string (matching `Purchase.status`'s existing plain-string convention rather than a Prisma enum), one of: `"none"`, `"active"`, `"past_due"`, `"canceled"`. Default `"none"` for every user who has never checked out.
-- `stripeCustomerId` / `stripeSubscriptionId` are nullable — only populated once a user actually completes a membership checkout. `stripeSubscriptionId` is `@unique` so webhook lookups by subscription ID are precise (0 or 1 row).
-- Generate the migration against a real reachable Postgres exactly as prior schema-changing tasks in this repo did (start the local Postgres if needed, run `npx prisma migrate dev --name add_user_membership_fields`), then confirm `npx prisma generate` succeeds.
+- **`mentorId` is nullable with `onDelete: SetNull`** (not `Restrict`, not `Cascade`) — deliberately mirroring the `Purchase.materialId`/`courseId` precedent already established in this repo. Rationale: a `MentorRequest` is itself a record of "someone asked to meet with mentor X" — valuable for the site owner's own stated accountability/transparency goals even after that mentor is later removed from the roster. Deleting the mentor should never silently destroy that history (`Cascade` would), and it shouldn't block an admin from removing a mentor who's left (`Restrict` would). `SetNull` keeps every request visible in the admin list with its own name/email/message intact; only the `mentor` relation itself becomes unset, and the admin UI must handle `request.mentor === null` by displaying something like "(mentor removed)" — specified below.
+- `sessionRateCents` is nullable (`null` or `0` both mean "free/not set" for this feature — informational display only, no charging logic anywhere reads this field for payment purposes).
+- Generate the migration the same way prior schema-changing tasks in this repo did (non-interactive `prisma migrate dev` doesn't work in this environment): run `npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --script > prisma/migrations/<timestamp>_add_mentor_and_mentor_request/migration.sql` (create that directory first), then `npx prisma migrate deploy`, then `npx prisma generate`.
 
 ### `src/lib/site.ts`
 
-- Change: add one new disclaimer string, following the exact tone/voice of the existing three disclaimers (do not invent new phrasing style).
+No new disclaimer string needed here — the placeholder agreement text lives directly in the form component (see below) since it's explicitly temporary/not-final copy, unlike the site's other permanent disclaimers.
 
-```ts
-membershipDisclaimer:
-  "Membership is completely optional and never required — every free class, and any material marked Free, stays free whether or not you join. Membership is a way to support this project directly. It is not a credit repair service, does not guarantee any change to your credit score or report, and does not expedite anything else on this site. Cancel anytime.",
-```
+### `src/app/mentoring/actions.ts` (new file)
 
-### `src/app/account/membership-actions.ts` (new file)
-
-`"use server"` file, following the exact conventions of `src/app/materials/actions.ts` (duplicate the local `getSiteOrigin()` helper here too — this repo's established convention is to duplicate this small helper per-file rather than share it, confirmed by its presence in both `materials/actions.ts`, `courses/actions.ts`, and `account/forgot-password/actions.ts`).
+`"use server"`, following `src/app/calendar/actions.ts`'s Zod/validation conventions and `src/app/account/forgot-password/actions.ts`'s exact Resend send pattern (`isResendConfigured()` guard, `getResend().emails.send({...})`, `console.error(...)` fallback when not configured — copy this shape exactly, do not invent a new one).
 
 ```ts
 "use server";
 
-import { headers } from "next/headers";
-import { redirect } from "next/navigation";
-import { requireUser } from "@/lib/dal";
+import { z } from "zod";
 import { db } from "@/lib/db";
-import { getStripe, isStripeConfigured } from "@/lib/stripe";
+import { getResend, isResendConfigured, EMAIL_FROM } from "@/lib/email";
 
-async function getSiteOrigin() { /* identical body to materials/actions.ts's version */ }
-
-export type MembershipActionState = { error?: string } | undefined;
-
-export async function startMembershipCheckout(
-  _prevState: MembershipActionState,
-  _formData: FormData
-): Promise<MembershipActionState>
-
-export async function openBillingPortal(
-  _prevState: MembershipActionState,
-  _formData: FormData
-): Promise<MembershipActionState>
-```
-
-**`startMembershipCheckout` behavior:**
-1. `const { userId } = await requireUser();` then `const user = await db.user.findUnique({ where: { id: userId } }); if (!user) return { error: "Account not found." };`
-2. If `!isStripeConfigured()`, return `{ error: "Online payments aren't set up yet. Please contact us directly." }` (mirrors the existing degrade-gracefully message style in `materials/actions.ts`).
-3. Guard double-submit / already-a-member: if `user.isComped || user.membershipStatus === "active"`, return `{ error: "You're already a member — thank you!" }` without creating a new Checkout Session.
-4. `const origin = await getSiteOrigin(); const stripe = getStripe();`
-5. Create the Checkout Session:
-```ts
-const session = await stripe.checkout.sessions.create({
-  mode: "subscription",
-  payment_method_types: ["card"],
-  customer_email: user.email,
-  client_reference_id: user.id,
-  line_items: [
-    {
-      price_data: {
-        currency: "usd",
-        unit_amount: 999,
-        recurring: { interval: "month" },
-        product_data: { name: "CreditCareCourse.com Membership" },
-      },
-      quantity: 1,
-    },
-  ],
-  success_url: `${origin}/account?membership=success`,
-  cancel_url: `${origin}/account`,
+const MentorRequestSchema = z.object({
+  mentorId: z.string().trim().min(1, "Please choose a mentor"),
+  name: z.string().trim().min(1, "Name is required"),
+  email: z.string().trim().email("Enter a valid email address"),
+  preferredTimes: z.string().trim().min(1, "Let us know what times work for you"),
+  message: z.string().trim().optional(),
+  agreedToTerms: z.literal(true, { errorMap: () => ({ message: "You must agree to continue" }) }),
 });
-```
-6. If `!session.url`, return `{ error: "Could not start checkout. Please try again." }`. Otherwise `redirect(session.url)`.
-7. Note: unlike `Purchase`, no DB row is pre-created here — `client_reference_id` carries the user identity through to the webhook, so there is nothing to correlate against beforehand and no "pending" state needed for membership.
 
-**`openBillingPortal` behavior:**
-1. `const { userId } = await requireUser();` then load the user.
-2. If `!user.stripeCustomerId`, return `{ error: "No billing account found yet." }`.
-3. `const origin = await getSiteOrigin(); const stripe = getStripe();`
-4. `const portalSession = await stripe.billingPortal.sessions.create({ customer: user.stripeCustomerId, return_url: \`${origin}/account\` });`
-5. If `!portalSession.url`, return `{ error: "Could not open the billing portal. Please try again." }`. Otherwise `redirect(portalSession.url)`.
+export type MentorRequestFormState = { error?: string; success?: boolean } | undefined;
 
-### `src/app/api/stripe/webhook/route.ts`
-
-- Change: extend the existing handler with new branches alongside the existing `checkout.session.completed` branch. Keep the existing one-time-purchase behavior byte-for-byte unchanged; branch on `session.mode` within `checkout.session.completed`, and add two new top-level `if (event.type === ...)` blocks for subscription lifecycle events.
-
-```ts
-if (event.type === "checkout.session.completed") {
-  const session = event.data.object as Stripe.Checkout.Session;
-
-  if (session.mode === "subscription") {
-    const userId = session.client_reference_id;
-    const customerId = typeof session.customer === "string" ? session.customer : session.customer?.id;
-    const subscriptionId =
-      typeof session.subscription === "string" ? session.subscription : session.subscription?.id;
-
-    if (userId && customerId && subscriptionId) {
-      await db.user.updateMany({
-        where: { id: userId },
-        data: {
-          stripeCustomerId: customerId,
-          stripeSubscriptionId: subscriptionId,
-          membershipStatus: "active",
-        },
-      });
-    }
-  } else if (session.payment_status === "paid") {
-    // existing one-time Purchase handling, unchanged
-    await db.purchase.updateMany({
-      where: { stripeSessionId: session.id },
-      data: { status: "paid" },
-    });
-  }
-}
-
-if (event.type === "customer.subscription.updated" || event.type === "customer.subscription.deleted") {
-  const subscription = event.data.object as Stripe.Subscription;
-  const status =
-    event.type === "customer.subscription.deleted"
-      ? "canceled"
-      : subscription.status === "active"
-        ? "active"
-        : subscription.status === "canceled"
-          ? "canceled"
-          : "past_due"; // covers past_due, unpaid, incomplete, incomplete_expired, trialing (unused), paused
-
-  await db.user.updateMany({
-    where: { stripeSubscriptionId: subscription.id },
-    data: { membershipStatus: status },
-  });
-}
+export async function createMentorRequest(
+  _prevState: MentorRequestFormState,
+  formData: FormData
+): Promise<MentorRequestFormState>
 ```
 
-- Use `updateMany` (not `update`) for every membership-related write in this file specifically so a not-found `id`/`stripeSubscriptionId` (unknown user, stale test webhook, race condition) matches zero rows instead of throwing — this is the concrete answer to the "webhook arrives for a user who no longer exists" edge case. Always `return NextResponse.json({ received: true })` at the end regardless, exactly as today.
-- No dedicated idempotency table is needed for the new branches: every write here is an idempotent *set* (not a create or increment), so Stripe redelivering the same event twice just sets the same values twice — a no-op difference. This differs from `Purchase`, which needs `stripeSessionId @unique` because it *creates* rows; membership never creates a row, only updates an existing `User`.
+**`createMentorRequest` behavior:**
+1. Parse `formData` with `MentorRequestSchema` (`agreedToTerms` comes from a checkbox: `formData.get("agreedToTerms") === "on"`, matching `ClassSchema`'s `published: formData.get("published") === "on"` convention — convert to boolean before validating against `z.literal(true)`, don't pass the raw string through). Return `{ error: ... }` on failure, mirroring every other action in this codebase.
+2. `const mentor = await db.mentor.findUnique({ where: { id: parsed.data.mentorId } }); if (!mentor || !mentor.active) return { error: "This mentor is no longer available. Please choose another." };` — handles both "mentor deleted" and "mentor deactivated after the page loaded" (stale dropdown) without throwing.
+3. `const request = await db.mentorRequest.create({ data: { mentorId: mentor.id, name, email, preferredTimes, message, agreedToTerms: true, status: "pending" } });`
+4. Email notifications (best-effort, never block success on send failure — wrap in the same `if (isResendConfigured())` pattern as forgot-password, and additionally don't let one send's failure prevent the other from attempting; use two independent `if` blocks, not one that returns early):
+   - Always to the site's own admin contact. Since there is no existing "admin notification email address" env var anywhere in this codebase, add `ADMIN_NOTIFICATION_EMAIL` as a new optional env var (document it in `.env.example` — see below); if unset, skip the admin email and `console.error` a note, same degrade-gracefully spirit as the rest of this file.
+     - Subject: `New 1-on-1 mentoring request`
+     - Body (plain text, matching the terse style of the forgot-password email): `New request for ${mentor.name}:\n\nFrom: ${name} (${email})\nPreferred times: ${preferredTimes}\nMessage: ${message || "(none)"}\n\nReview and approve/decline at ${origin}/admin/mentoring` (reuse the exact `getSiteOrigin()` helper body from `materials/actions.ts`, duplicated locally per this repo's established per-file convention).
+   - If `mentor.notifyMentorOnRequest`, also send the same email content to `mentor.email`.
+5. `revalidatePath("/admin/mentoring")` (no public page needs revalidation since the public form doesn't list requests).
+6. Return `{ success: true }`.
 
-### `src/app/account/page.tsx`
-
-- Change: insert a new "Membership" section directly after the existing username/email info block (before "My materials"), using the same `rounded-lg border border-slate-200 p-5`-style card as the info block above it.
-- Logic (evaluate in this priority order):
-  1. `user.isComped` → render: *"You have complimentary membership access — thank you for being part of {site.name}."* No button.
-  2. else `user.membershipStatus === "active"` → render: *"You're a member ($9.99/month)."* plus `<ManageMembershipForm />`.
-  3. else (`"none" | "past_due" | "canceled"`) → render `<DisclaimerBanner>{site.membershipDisclaimer}</DisclaimerBanner>` plus copy *"Optional membership — $9.99 to join today, $9.99/month after."* plus `<BecomeMemberForm />`. If status is `"past_due"` or `"canceled"` specifically, prepend a short line noting that ("Your last membership payment didn't go through." / "Your membership was canceled.") before the same become-a-member CTA — clicking it starts a fresh Checkout Session; the webhook naturally overwrites `stripeSubscriptionId`/`membershipStatus` with the new subscription.
-- Import `site` from `@/lib/site` and `DisclaimerBanner` from `@/components/disclaimer-banner` (both already exist).
-
-### `src/app/account/become-member-form.tsx` (new file)
-
-`"use client"` component, following the exact `useActionState` pattern of `src/app/account/change-password-form.tsx` (read that file for the precise structure/error-rendering convention before writing this). Wraps a `<form action={...}>` calling `startMembershipCheckout`, single submit button labeled "Become a member — $9.99/mo", renders `state.error` in the same red-text style used elsewhere (`text-sm text-red-600`).
-
-### `src/app/account/manage-membership-form.tsx` (new file)
-
-Same pattern, wraps `openBillingPortal`, single submit button labeled "Manage membership".
-
-### `src/app/admin/users/page.tsx` (new file)
-
-Follows `src/app/admin/materials/page.tsx`'s exact table structure/styling.
-
-```tsx
-import { requireAdmin } from "@/lib/dal";
-import { db } from "@/lib/db";
-import { toggleComp } from "./actions";
-
-export default async function AdminUsersPage() {
-  await requireAdmin();
-  const users = await db.user.findMany({ orderBy: { createdAt: "desc" } });
-  // table columns: Username, Email, Membership (badge), Joined, [Comp/Un-comp button]
-}
-```
-
-- Membership badge logic per row: `u.isComped` → "Comped" (green badge, same `bg-green-100 text-green-700` style as the `Published` badge in `admin/materials/page.tsx`); else `u.membershipStatus === "active"` → "Active" (green); else `"past_due"` → "Past due" (amber, `bg-amber-100 text-amber-700`); else `"canceled"` → "Canceled" (slate, `bg-slate-100 text-slate-500`); else `"none"` → "—" (slate, muted, no badge pill needed, just the em-dash in `text-slate-400`).
-- Action column: a `<form action={toggleComp.bind(null, u.id)}>` with a single submit button reading "Un-comp" if `u.isComped` else "Comp" — same `.bind(null, id)` pattern as `deleteMaterial` in `admin/materials/page.tsx`.
-- Empty state: `No users yet.` row, matching the `No materials yet.` convention.
-
-### `src/app/admin/users/actions.ts` (new file)
+### `src/app/admin/mentoring/actions.ts` (new file)
 
 ```ts
 "use server";
@@ -219,33 +105,148 @@ export default async function AdminUsersPage() {
 import { revalidatePath } from "next/cache";
 import { requireAdmin } from "@/lib/dal";
 import { db } from "@/lib/db";
+import { getResend, isResendConfigured, EMAIL_FROM } from "@/lib/email";
 
-export async function toggleComp(userId: string) {
+async function getSiteOrigin() { /* identical duplicated body */ }
+
+export async function approveMentorRequest(requestId: string)
+export async function declineMentorRequest(requestId: string)
+```
+
+**Both functions share this shape** (write as two functions, not one parameterized function, matching this repo's existing preference for explicit named actions like `createClass`/`updateClass` over one generic function):
+1. `await requireAdmin();`
+2. `const request = await db.mentorRequest.findUnique({ where: { id: requestId }, include: { mentor: true } }); if (!request) return;` — handles a stale/already-deleted row without throwing.
+3. **Idempotency guard**: `if (request.status !== "pending") return;` — a request already approved/declined (double-click, or re-submission of a stale admin page) is a silent no-op, not a second email or an error. This is the concrete answer to "admin approves/declines a request twice."
+4. `await db.mentorRequest.update({ where: { id: requestId }, data: { status: "approved" /* or "declined" */ } });`
+5. Email the requester (best-effort, same `isResendConfigured()` guard):
+   - Approve subject: `Your 1-on-1 session request was approved` / body: `Good news — your request to meet with ${request.mentor?.name ?? "a mentor"} was approved. They'll be in touch directly to arrange a time.` (only reachable if `request.mentor` is non-null at approval time in the normal flow, but written defensively per the SetNull edge case).
+   - Decline subject: `Update on your 1-on-1 session request` / body: `Thanks for your interest — we're not able to move forward with this request right now.`
+6. `revalidatePath("/admin/mentoring");`
+
+### `src/app/admin/mentoring/page.tsx` (new file)
+
+Single admin page listing **every** `MentorRequest` across all mentors (not nested under a specific mentor, per the site owner's explicit "admins need to see all pending requests at a glance" requirement) — follows `src/app/admin/classes/page.tsx`'s table styling exactly.
+
+```tsx
+import { requireAdmin } from "@/lib/dal";
+import { db } from "@/lib/db";
+import { formatClassDate } from "@/lib/format";
+import { approveMentorRequest, declineMentorRequest } from "./actions";
+
+export default async function AdminMentoringPage() {
   await requireAdmin();
-  const user = await db.user.findUnique({ where: { id: userId } });
-  if (!user) return;
-  await db.user.update({ where: { id: userId }, data: { isComped: !user.isComped } });
-  revalidatePath("/admin/users");
+  const requests = await db.mentorRequest.findMany({
+    include: { mentor: true },
+    orderBy: { createdAt: "desc" },
+  });
+  // table columns: Requester (name/email), Mentor (mentor?.name ?? "(mentor removed)"),
+  // Preferred times, Status (badge), Requested (date), actions (Approve/Decline forms,
+  // only rendered when status === "pending"; otherwise show nothing in that cell)
 }
 ```
 
-- No form state / validation needed — this is a no-arg toggle, matching `deleteMaterial`'s existing no-`useActionState` convention exactly.
+- Status badge colors, matching `admin/materials/page.tsx`'s Published/Draft convention: `"pending"` → amber (`bg-amber-100 text-amber-700`), `"approved"` → green (`bg-green-100 text-green-700`), `"declined"` → slate (`bg-slate-100 text-slate-500`).
+- Action cell: two separate `<form action={approveMentorRequest.bind(null, r.id)}>`/`<form action={declineMentorRequest.bind(null, r.id)}>` with distinct submit buttons ("Approve" blue-ish text, "Decline" red text — matching the Edit/Delete link-button pairing style in `admin/materials/page.tsx`), rendered only `{r.status === "pending" && (...)}`; for non-pending rows, render nothing in that cell (or a muted em-dash) so an already-actioned row can't be re-submitted from the UI (belt-and-suspenders alongside the idempotency guard in the actions themselves).
+- Empty state: `No mentoring requests yet.`, matching the `No classes yet.` convention.
+
+### `src/app/admin/mentors/page.tsx` (new file), `src/app/admin/mentors/new/page.tsx`, `src/app/admin/mentors/[id]/edit/page.tsx`, `src/app/admin/mentors/actions.ts`, `src/app/admin/mentors/mentor-form.tsx`
+
+Full CRUD for `Mentor`, replicating `admin/classes/`'s exact file layout and conventions 1:1 (list page with Edit/Delete + Active/Draft-style badge using the `active` boolean instead of `published`; `new`/`[id]/edit` pages both rendering the shared `MentorForm` client component with `action={createMentor}`/`action={updateMentor.bind(null, id)}`; `deleteMentor(id)` as a plain no-form-state action like `deleteClass`).
+
+- `MentorSchema` (Zod): `name` (required string), `email` (required, valid email), `bio` (optional string), `sessionRateDollars` (optional `z.coerce.number().min(0)`, converted to `sessionRateCents` via `Math.round(data.sessionRateDollars * 100)` exactly like `MaterialSchema`'s `priceDollars`→`priceCents`, `undefined`/`0` input stored as `null`), `notifyMentorOnRequest` (`formData.get("notifyMentorOnRequest") === "on"`), `active` (`formData.get("active") === "on"`).
+- `MentorForm` fields: Name, Email, Bio (optional textarea), Session rate in dollars (optional number input, labeled "Session rate (optional, informational only — not charged automatically)"), a checkbox "Also email this mentor directly when someone requests them", a checkbox "Active (visible on the public request form)".
+- `deleteMentor(id)`: `await requireAdmin(); await db.mentor.delete({ where: { id } }); revalidatePath("/admin/mentors"); revalidatePath("/mentoring");` — deleting a Mentor is allowed even with existing `MentorRequest` rows (per the `SetNull` schema decision above); no confirmation dialog needed, matching this repo's existing delete-button convention (no existing delete action in this codebase has a confirm step).
 
 ### `src/app/admin/layout.tsx`
 
-- Change: add one entry to the `links` array: `{ href: "/admin/users", label: "Users" }` (place it after `"Classes"`/`"Courses"`, before `"Export"` — match existing array order style).
+Add two nav entries: `{ href: "/admin/mentors", label: "Mentors" }` and `{ href: "/admin/mentoring", label: "Mentoring requests" }`, placed after `"Users"` and before `"Export"`.
+
+### `src/app/mentoring/page.tsx` (new file)
+
+Public page, following `src/app/materials/page.tsx`'s layout convention (`mx-auto max-w-*` container, `<h1>`, intro paragraph).
+
+```tsx
+import { db } from "@/lib/db";
+import MentorRequestForm from "./mentor-request-form";
+
+export const metadata = { title: "1-on-1 Mentoring" };
+export const dynamic = "force-dynamic";
+
+export default async function MentoringPage() {
+  const mentors = await db.mentor.findMany({
+    where: { active: true },
+    orderBy: { name: "asc" },
+  });
+  // renders intro copy + <MentorRequestForm mentors={mentors} />
+}
+```
+
+- If `mentors.length === 0`, render a plain message instead of the form: `"1-on-1 mentoring isn't available to request right now — check back soon."` — the concrete answer to "no active mentors exist yet."
+- Pass only the fields the form actually needs to the client component (`id`, `name`, `sessionRateCents`, `bio`) — do not pass `email` or any other field not needed client-side (there's nothing sensitive on `Mentor` today, but keep the prop surface minimal on principle, consistent with this being a public page).
+
+### `src/app/mentoring/mentor-request-form.tsx` (new file)
+
+`"use client"`, following `src/app/calendar/signup-form.tsx`'s `useActionState` structure.
+
+```tsx
+"use client";
+
+import { useActionState } from "react";
+import { createMentorRequest } from "./actions";
+import { formatMoney } from "@/lib/format";
+
+type MentorOption = { id: string; name: string; sessionRateCents: number | null; bio: string | null };
+
+export default function MentorRequestForm({ mentors }: { mentors: MentorOption[] }) {
+  const [state, formAction, pending] = useActionState(createMentorRequest, undefined);
+  // ...
+}
+```
+
+- Fields: a `<select name="mentorId">` populated from `mentors` (option label: `${m.name}${m.sessionRateCents ? \` — \${formatMoney(m.sessionRateCents)}/session\` : " — Free"}`), Name, Email, "Preferred times" (`<textarea name="preferredTimes" placeholder="e.g. Weekday evenings, or Tuesday/Thursday after 6pm">`), "What do you need help with?" (`<textarea name="message">`, optional), and a checkbox `<input type="checkbox" name="agreedToTerms" required>` next to the following text, wrapped in a code comment immediately above it in the source:
+
+```tsx
+{/* PLACEHOLDER — this is not final legal agreement text. Replace with
+    lawyer-reviewed consent/agreement copy before this form is used with
+    real members, especially given CROA considerations for 1-on-1 credit
+    consulting. Do not treat this wording as legally sufficient. */}
+<label className="flex items-start gap-2 text-sm text-slate-600">
+  <input type="checkbox" name="agreedToTerms" required className="mt-1" />
+  I understand this request does not guarantee a session, that a mentor or
+  admin must approve it first, and I agree to the terms of participating in
+  a 1-on-1 session (placeholder — final agreement pending legal review).
+</label>
+```
+
+- On `state?.success`, render a confirmation message instead of the form (matching `calendar/signup-form.tsx`'s pattern of swapping the whole form out for a success message): `"Request sent! We'll follow up by email once it's reviewed — this doesn't book anything automatically."`
+- On `state?.error`, render it in the same `text-sm text-red-600` style used everywhere else.
+
+### `.env.example`
+
+Add, in the same commented style as the existing entries:
+
+```
+# Optional: only needed to receive an email when someone submits a 1-on-1
+# mentoring request (src/app/mentoring). If unset, requests still save
+# normally — you'll just need to check /admin/mentoring manually.
+ADMIN_NOTIFICATION_EMAIL=""
+```
+
+### Site nav (optional link placement — open question, see below)
+
+No footer/header link is specified as required; the planner leaves this as an open question below rather than guessing where the site owner wants public discoverability of `/mentoring`.
 
 ## Edge cases
 
-- **User is both comped and has completed a real Stripe checkout (either order):** No reconciliation needed — `isComped` and `membershipStatus` are independent fields checked in strict priority order (`isComped` first) purely at render/CTA time in `/account`. Real Stripe webhooks keep updating `membershipStatus` in the background regardless of `isComped`'s value; if an admin later un-comps the user, whatever `membershipStatus` Stripe most recently reported becomes visible again automatically, with no extra sync logic required.
-- **Webhook arrives for a user id / subscription id that doesn't exist (deleted user, stale test event, race condition):** All membership webhook writes use `updateMany`, which matches zero rows silently instead of throwing. The handler always returns `{ received: true }` with 200 regardless, exactly as the existing purchase-completion branch does.
-- **Subscription lapses (`past_due`/`canceled`):** Per the business requirement, this must never affect access to free classes or free materials anywhere else in the app — no other file in this spec should read `membershipStatus` for any access-control decision. Only `/account`'s own display and CTA copy change.
-- **Double-submission of "Become a member":** Guarded at the top of `startMembershipCheckout` by checking `user.isComped || user.membershipStatus === "active"` before creating a Checkout Session, returning a friendly "already a member" error instead of a second subscription.
-- **Duplicate webhook delivery for the same event (Stripe retries):** Safe by construction — every membership write is an idempotent `set`, not a create or increment, so replaying the same event twice produces the same end state. `stripeSubscriptionId @unique` exists for query precision (0-or-1-row lookups), not as a dedup mechanism.
-- **Admin un-comps a user who never paid (no Stripe subscription ever created):** `membershipStatus` is untouched by the un-comp action and remains whatever it already was — `"none"` by default for a user webhooks never touched — so `/account` correctly falls back to showing the "become a member" CTA. No special-casing needed.
-- **Env vars:** No new ones. Reuses `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, `SITE_URL`, all already documented in `.env.example`. Flag this to the site owner as a deployment note (not a code change): in the Stripe Dashboard, the existing webhook endpoint must also be subscribed to the `customer.subscription.updated` and `customer.subscription.deleted` event types (in addition to whatever it already sends `checkout.session.completed` for) — if the endpoint is already configured to send all event types, no dashboard change is needed at all.
-- **Wording/legal:** All new user-facing copy must go through `site.membershipDisclaimer` and match the existing soft, non-outcome-linked tone. Do not use words like "unlock," "premium," or anything implying membership affects credit-repair results or speed.
+- **Submitting a request for an inactive or deleted mentor**: `createMentorRequest` re-fetches the mentor server-side and checks `!mentor || !mentor.active`, returning a clear error — never trusts the client-submitted dropdown value as proof the mentor is still valid/active.
+- **Admin approves/declines a request twice**: `if (request.status !== "pending") return;` guard in both actions — second click is a silent no-op, no duplicate email, no error.
+- **Resend not configured**: request submission and approve/decline all still succeed and persist to the database; every email send is wrapped in `isResendConfigured()` exactly like `forgot-password/actions.ts`, with a `console.error` fallback instead of a thrown error.
+- **No active mentors exist**: `/mentoring` shows a plain "not available right now" message instead of an empty/broken dropdown.
+- **Admin deletes a Mentor with existing requests**: allowed; `onDelete: SetNull` keeps every `MentorRequest` row intact with `mentorId` set to `null`; the admin requests list renders `"(mentor removed)"` in that case (both list page and the approve/decline confirmation email body handle `mentor` being `null` defensively, per the exact wording specified above).
+- **Long free-text `message`/`preferredTimes`**: no length cap — consistent with this codebase's existing text fields (`Signup.notes`, `Purchase` fields, etc.), none of which impose one at the Zod layer today. Do not introduce new validation the rest of the app doesn't already have.
+- **`agreedToTerms` must be true to submit**: enforced via `z.literal(true)` server-side (not just a client-side `required` attribute) — a request can never be created with this false, matching this codebase's general pattern of never trusting client-side-only validation for anything written to the database.
 
 ## Open questions
 
-None — all structural decisions were confirmed directly with the site owner (billing shape, comp-toggle behavior, free-core-stays-free requirement) before this spec was written.
+- **Public discoverability of `/mentoring`**: the spec doesn't add a link to it from the main nav, footer, or homepage — the site owner didn't specify where this page should be reachable from. Recommend adding a link during/after this build once the owner sees the page (e.g., alongside "Classes & Calendar" in the header, or from `/account`), but implementing that placement now would be guessing; flagging rather than silently deciding.
+- **`Mentor.bio` field**: included in the schema per the planner's judgment (useful context for a visitor choosing between mentors) but the site owner never explicitly asked for it. Low-risk inclusion — cheap to leave unused (just an optional textarea) if it turns out not to be wanted; flagging since it wasn't explicitly requested.

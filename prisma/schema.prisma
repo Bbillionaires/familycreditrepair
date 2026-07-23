@@ -127,3 +127,32 @@ model Purchase {
   @@index([materialId])
   @@index([courseId])
 }
+
+model Mentor {
+  id                    String          @id @default(cuid())
+  name                  String
+  email                 String
+  bio                   String?
+  sessionRateCents      Int?
+  notifyMentorOnRequest Boolean         @default(false)
+  active                Boolean         @default(true)
+  createdAt             DateTime        @default(now())
+  updatedAt             DateTime        @updatedAt
+  requests              MentorRequest[]
+}
+
+model MentorRequest {
+  id             String   @id @default(cuid())
+  mentor         Mentor?  @relation(fields: [mentorId], references: [id], onDelete: SetNull)
+  mentorId       String?
+  name           String
+  email          String
+  preferredTimes String
+  message        String?
+  agreedToTerms  Boolean
+  status         String   @default("pending")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([mentorId])
+}

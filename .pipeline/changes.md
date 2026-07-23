@@ -1,21 +1,21 @@
-# Changes: Optional $9.99/month membership (Stripe subscription)
+# Changes: 1-on-1 mentoring request (request-then-approve, no booking/payment)
 
 ## Files changed
-- `prisma/schema.prisma`: added `isComped`, `membershipStatus`, `stripeCustomerId`, `stripeSubscriptionId` to `User`.
-- `prisma/migrations/20260722232503_add_user_membership_fields/migration.sql`: new migration (generated via `prisma migrate diff` + `prisma migrate deploy`, since `prisma migrate dev` isn't usable non-interactively in this environment — same constraint as prior schema-changing tasks in this repo).
-- `src/lib/site.ts`: added `membershipDisclaimer` string, matching the tone of the existing three disclaimers.
-- `src/app/account/membership-actions.ts` (new): `startMembershipCheckout` (Stripe subscription Checkout Session, inline `price_data`, `client_reference_id` correlation) and `openBillingPortal` (Stripe Billing Portal redirect).
-- `src/app/account/become-member-form.tsx` (new): client form wrapping `startMembershipCheckout`.
-- `src/app/account/manage-membership-form.tsx` (new): client form wrapping `openBillingPortal`.
-- `src/app/account/page.tsx`: added a "Membership" section (priority: comped → active → none/past_due/canceled) between the account-info card and "My materials".
-- `src/app/api/stripe/webhook/route.ts`: extended `checkout.session.completed` to branch on `session.mode === "subscription"`; added `customer.subscription.updated`/`customer.subscription.deleted` handling. All membership writes use `updateMany` so an unmatched id/subscription silently no-ops instead of throwing.
-- `src/app/admin/users/page.tsx` (new): admin table of all users with a membership status badge and per-row Comp/Un-comp toggle.
-- `src/app/admin/users/actions.ts` (new): `toggleComp(userId)` server action.
-- `src/app/admin/layout.tsx`: added `{ href: "/admin/users", label: "Users" }` nav link.
+- `prisma/schema.prisma`: added `Mentor` and `MentorRequest` models. `MentorRequest.mentorId` is nullable with `onDelete: SetNull`, matching the `Purchase` precedent (deleting a mentor keeps request history intact instead of destroying it).
+- `prisma/migrations/20260723163403_add_mentor_and_mentor_request/migration.sql`: new migration (diff+deploy workaround, same non-interactive-environment constraint as the two prior schema-changing tasks).
+- `src/app/mentoring/actions.ts` (new): `createMentorRequest` — validates input, re-checks the mentor is still active server-side, creates the request, and sends best-effort notification emails (admin via new `ADMIN_NOTIFICATION_EMAIL`, plus the mentor if `notifyMentorOnRequest` is set) using the existing `src/lib/email.ts` Resend pattern.
+- `src/app/mentoring/page.tsx` (new): public page, empty-mentor-list message, passes only the fields the form needs to the client component.
+- `src/app/mentoring/mentor-request-form.tsx` (new): client form with the mentor dropdown, request fields, and the clearly-commented placeholder agreement checkbox.
+- `src/app/admin/mentoring/actions.ts` (new): `approveMentorRequest`/`declineMentorRequest` — idempotency guard (`if (request.status !== "pending") return;`), then status update + best-effort outcome email to the requester. Factored the actual email-send call into one shared `sendOutcomeEmail` helper (not exported) to avoid duplicating the Resend-call boilerplate between the two actions — the two actions themselves remain separate, explicit exported functions per the spec, not one parameterized action.
+- `src/app/admin/mentoring/page.tsx` (new): admin list of every request across all mentors, status badges, Approve/Decline forms shown only for `"pending"` rows, `"(mentor removed)"` fallback for a `null` mentor relation.
+- `src/app/admin/mentors/actions.ts`, `mentor-form.tsx`, `page.tsx`, `new/page.tsx`, `[id]/edit/page.tsx` (all new): full Mentor CRUD, replicating `admin/classes`'s exact file layout/conventions (dollars↔cents conversion mirrors `MaterialSchema`'s `priceDollars`→`priceCents`).
+- `src/app/admin/layout.tsx`: added `Mentors` and `Mentoring requests` nav links, after `Users` and before `Export`.
+- `.env.example`: added `ADMIN_NOTIFICATION_EMAIL` (optional), documented in the same comment style as existing entries.
 
 ## Notes / deviations from spec
-- None — implemented exactly as specified. `prisma migrate dev` required the diff+deploy workaround noted above (same as documented necessity in this repo's history), not a deviation from the intended schema.
+- `z.literal(true, { errorMap: () => ... })` from the spec doesn't compile against the installed Zod 4 (`^4.4.3`) — that's a Zod 3-era API. Fixed to `z.literal(true, { message: "You must agree to continue" })`, which is Zod 4's actual second-argument shape. Confirmed via the real compiler error, not guessed; no other file in this codebase uses `z.literal` with a custom message to cross-check against, so this was a genuine spec/library-version mismatch, not an existing-convention violation.
+- Everything else implemented exactly as specified, including the two open questions the spec deliberately left unresolved (no nav link added anywhere to `/mentoring` yet; `Mentor.bio` included as specified, unused beyond being passed through to the form).
 
 ## Build/lint status
-- `npm run lint`: 0 errors, 4 warnings (`_prevState`/`_formData` unused — both params in `membership-actions.ts` are genuinely unused since these are no-arg actions that must still match `useActionState`'s `(prevState, formData)` signature; same class of warning would appear anywhere this pattern is used with no data actually read).
-- `npm run build`: passes. `prisma migrate deploy && next build` completed cleanly; `/admin/users` and all account/webhook changes compiled with no TypeScript errors.
+- `npm run lint`: 0 errors, 4 warnings — all four are pre-existing (from the earlier membership feature's `_prevState`/`_formData` unused params), none new from this change.
+- `npm run build`: passes after the Zod fix above. All new routes (`/mentoring`, `/admin/mentors`, `/admin/mentors/new`, `/admin/mentors/[id]/edit`, `/admin/mentoring`) compiled and are listed in the route output.
