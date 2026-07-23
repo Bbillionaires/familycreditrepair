@@ -39,14 +39,20 @@ export default async function AdminLayout({ children }: { children: React.ReactN
               </Link>
             ))}
           </nav>
-          <form action={logoutAction}>
-            <button
-              type="submit"
-              className="rounded-md px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-900"
-            >
-              Log out
-            </button>
-          </form>
+          <div className="flex items-center gap-3">
+            <span className="flex items-center gap-1.5 rounded-full bg-green-50 px-3 py-1 text-xs font-medium text-green-700">
+              <span className="h-1.5 w-1.5 rounded-full bg-green-500" />
+              Signed in as Admin
+            </span>
+            <form action={logoutAction}>
+              <button
+                type="submit"
+                className="rounded-md px-3 py-2 text-sm font-medium text-slate-500 hover:bg-slate-100 hover:text-slate-900"
+              >
+                Log out
+              </button>
+            </form>
+          </div>
         </div>
       </div>
       <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</div>
