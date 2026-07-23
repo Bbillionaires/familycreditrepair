@@ -106,8 +106,12 @@ model User {
   membershipStatus     String    @default("none")
   stripeCustomerId     String?
   stripeSubscriptionId String?   @unique
+  chatCreditBalance    Int       @default(0)
   createdAt            DateTime  @default(now())
   updatedAt            DateTime  @updatedAt
+
+  chatUsages        ChatUsage[]
+  chatPackPurchases ChatPackPurchase[]
 }
 
 model Purchase {
@@ -155,4 +159,35 @@ model MentorRequest {
   updatedAt      DateTime @updatedAt
 
   @@index([mentorId])
+}
+
+model ChatUsage {
+  id        String   @id @default(cuid())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+model ChatPackPurchase {
+  id               String   @id @default(cuid())
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId           String
+  questionsGranted Int
+  amountCents      Int
+  stripeSessionId  String   @unique
+  status           String   @default("pending")
+  createdAt        DateTime @default(now())
+
+  @@index([userId])
+}
+
+model ChatSettings {
+  id                 String   @id @default("singleton")
+  dailyFreeQuestions Int      @default(3)
+  packQuestionCount  Int      @default(10)
+  packPriceCents     Int      @default(200)
+  hardDailyCap       Int      @default(20)
+  updatedAt          DateTime @updatedAt
 }

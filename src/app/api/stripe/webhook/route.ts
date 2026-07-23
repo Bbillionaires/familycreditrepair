@@ -44,10 +44,33 @@ export async function POST(request: Request) {
         });
       }
     } else if (session.payment_status === "paid") {
-      await db.purchase.updateMany({
-        where: { stripeSessionId: session.id },
-        data: { status: "paid" },
-      });
+      const chatPack = await db.chatPackPurchase.findUnique({ where: { stripeSessionId: session.id } });
+
+      if (chatPack) {
+        // Idempotency: a replayed/duplicate webhook delivery for the same
+        // session finds status already "paid" and is a deliberate no-op —
+        // this is the only place in the app that increments (rather than
+        // sets) a balance, so it needs an explicit dedup guard, unlike the
+        // membership branch above where every write is an idempotent set.
+        if (chatPack.status !== "paid") {
+          // First (and, per this app's conventions, only) use of a
+          // transaction here — this is a genuine multi-table atomic update
+          // (flip the purchase's status AND credit the user's balance
+          // together); every other write in this app is single-table.
+          await db.$transaction([
+            db.chatPackPurchase.update({ where: { id: chatPack.id }, data: { status: "paid" } }),
+            db.user.update({
+              where: { id: chatPack.userId },
+              data: { chatCreditBalance: { increment: chatPack.questionsGranted } },
+            }),
+          ]);
+        }
+      } else {
+        await db.purchase.updateMany({
+          where: { stripeSessionId: session.id },
+          data: { status: "paid" },
+        });
+      }
     }
   }
 

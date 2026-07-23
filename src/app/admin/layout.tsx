@@ -11,6 +11,7 @@ const links = [
   { href: "/admin/users", label: "Users" },
   { href: "/admin/mentors", label: "Mentors" },
   { href: "/admin/mentoring", label: "Mentoring requests" },
+  { href: "/admin/chat-settings", label: "Chat Settings" },
   { href: "/admin/export", label: "Export" },
 ];
 

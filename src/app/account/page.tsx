@@ -83,12 +83,20 @@ export default async function AccountPage() {
       <div className="mt-6 rounded-lg border border-slate-200 p-5">
         <h2 className="text-lg font-semibold text-slate-900">Membership</h2>
         {user.isComped ? (
-          <p className="mt-2 text-sm text-slate-600">
-            You have complimentary membership access — thank you for being part of {site.name}.
-          </p>
+          <>
+            <p className="mt-2 text-sm text-slate-600">
+              You have complimentary membership access — thank you for being part of {site.name}.
+            </p>
+            <Link href="/account/chat" className="mt-2 inline-block text-sm font-medium text-blue-600 hover:underline">
+              Open the AI chat assistant →
+            </Link>
+          </>
         ) : user.membershipStatus === "active" ? (
           <>
             <p className="mt-2 text-sm text-slate-600">You&apos;re a member ($9.99/month).</p>
+            <Link href="/account/chat" className="mt-2 inline-block text-sm font-medium text-blue-600 hover:underline">
+              Open the AI chat assistant →
+            </Link>
             <ManageMembershipForm />
           </>
         ) : (
